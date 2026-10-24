@@ -1,6 +1,6 @@
-# PostgreSQL module
+# zig-postgres
 
-Version0.2.0, Zig0.17.0 package exporting `postgres`. It builds with the Zig standard library.
+Version 0.2.0, Zig 0.17.0 package exporting `postgres`. It builds with the Zig standard library.
 
 From this directory:
 
@@ -16,7 +16,8 @@ uses `PGUSER`, `PGPASSWORD`, `PGDATABASE` and optional `PGHOST`/`PGPORT`; it exe
 `BEGIN`, bound `SELECT $1::bigint`, `COMMIT`. Live authentication and cancellation regressions
 remain owned by the backend fixtures.
 
-Consumers add a `postgres` path dependency on this directory and import
+Consumers add a `postgres` dependency pointing to this checkout, for example
+`.postgres = .{ .path = "../zig-postgres" }` in `build.zig.zon`, and import
 `b.dependency("postgres", .{ .target = target, .optimize = optimize }).module("postgres")`.
 The public root exports `PgClient`, `PgError`, `PgRow`, `PgResult`, `Pool`,
 `PoolConfig`, `Transaction` and the `client`, `pool`, `scram`, `diagnostic`,
@@ -57,8 +58,7 @@ remain valid across subsequent queries until `deinit`; the current row API has
 no column metadata. Pool destruction requires all borrowers to have returned.
 Borrowers that change session settings, create temporary objects or hold session
 advisory locks must restore their state or call `Pool.discard`. The pool does not
-perform a full session reset. Current development evidence and remaining driver
-gaps are recorded in the [development receipt](../../scripts/postgres_development.md).
+perform a full session reset.
 
 `zig build build-live` compiles `zig-out/bin/postgres-verify` without executing it.
 The opt-in verifier requires `POSTGRES_TEST_DATABASE` from the backend's existing
