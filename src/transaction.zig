@@ -18,13 +18,6 @@ pub const Transaction = struct {
     }
     pub fn deinit(self: *Transaction) void {
         if (self.committed or !self.client.reusable) return;
-        const protection = self.client.io.swapCancelProtection(.blocked);
-        defer _ = self.client.io.swapCancelProtection(protection);
-        const diagnostic = self.client.last_diagnostic;
-        defer self.client.last_diagnostic = diagnostic;
-        if (self.client.query("ROLLBACK")) |value| {
-            var result = value;
-            result.deinit();
-        } else |_| {}
+        self.client.rollbackCleanup();
     }
 };

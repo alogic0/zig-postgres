@@ -24,4 +24,15 @@ pub fn build(b: *std.Build) void {
     const check = b.step("check", "Compile the public consumer and offline tests");
     check.dependOn(&probe.step);
     check.dependOn(&tests.step);
+
+    const live = b.addExecutable(.{
+        .name = "postgres-verify",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/verify.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "postgres", .module = postgres }},
+        }),
+    });
+    b.step("build-live", "Compile the opt-in disposable PostgreSQL verifier").dependOn(&b.addInstallArtifact(live, .{}).step);
 }

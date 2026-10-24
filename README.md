@@ -27,9 +27,13 @@ Client/result allocations belong to their supplied allocator. Destroy results
 with `deinit`, close directly owned clients with `close`, and release or discard
 pool borrowers before destroying the pool. Pool configuration strings outlive
 the pool. Cancellation invalidates an incomplete connection exchange; pool
-release automatically discards non-reusable clients. Explicit `discard` also
-invalidates a borrower. Transaction cleanup rolls back an uncommitted
-reusable client. A lost COMMIT response remains ambiguous.
+release automatically discards non-reusable clients and sessions still inside
+an open or failed transaction. `transaction_status` records the last validated
+ReadyForQuery state; an incomplete exchange is unknown. Explicit `discard` also
+invalidates a borrower. Transaction cleanup rolls back an uncommitted reusable
+client under one joined 500 ms budget, including an already-canceled caller. A
+failed or expired cleanup invalidates the connection. A lost COMMIT response
+remains ambiguous; successful commit waiting does not use the cleanup timeout.
 
 This is the existing bounded wire-v3 client, not a complete PostgreSQL driver.
 It supports text simple queries and trust/cleartext/SCRAM-SHA-256 authentication.
@@ -48,6 +52,13 @@ remain valid across subsequent queries until `deinit`; the current row API has
 no column metadata. Pool destruction requires all borrowers to have returned.
 Borrowers that change session settings, create temporary objects or hold session
 advisory locks must restore their state or call `Pool.discard`. The pool does not
-perform a full session reset. Current transaction-status tracking and bounded
-rollback gaps are recorded in the
-[development receipt](../../scripts/postgres_development.md).
+perform a full session reset. Current development evidence and remaining driver
+gaps are recorded in the [development receipt](../../scripts/postgres_development.md).
+
+`zig build build-live` compiles `zig-out/bin/postgres-verify` without executing it.
+The opt-in verifier requires `POSTGRES_TEST_DATABASE` from the backend's existing
+disposable schema lease and `POSTGRES_TEST_REPORT` for its JSON report. It checks
+the exact database ownership marker before writes, uses the local acceptance
+PostgreSQL endpoint, and rejects unowned databases. Run one verifier per lease at
+a time. The verifier owns only its `pg_development_rows` table and loopback peers;
+the existing schema process owns database creation, migration and removal.

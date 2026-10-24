@@ -13,6 +13,8 @@ pub const PgError = error{
     BufferTooSmall,
 };
 
+pub const TransactionStatus = enum { unknown, idle, transaction, failed_transaction };
+
 pub const PgRow = struct {
     allocator: std.mem.Allocator,
     values: []const ?[]const u8,
@@ -67,6 +69,7 @@ pub const PgClient = struct {
     last_diagnostic: ?diagnostic.Diagnostic = null,
     /// An incomplete exchange cannot safely be returned to a connection pool.
     reusable: bool = true,
+    transaction_status: TransactionStatus = .unknown,
     address: ?std.Io.net.IpAddress = null,
     cancel_key: ?@import("cancel.zig").Key = null,
 
@@ -211,6 +214,7 @@ pub const PgClient = struct {
                 },
                 'Z' => {
                     if (!authenticated or frame.body.len != 1 or frame.body[0] != 'I') return PgError.ProtocolViolation;
+                    self.transaction_status = .idle;
                     return;
                 },
                 'E' => return PgError.AuthenticationFailed,
@@ -347,9 +351,54 @@ pub const PgClient = struct {
             // DatabaseError is returned only after ReadyForQuery. Every other
             // failure may leave a partial frame; no later query may reuse it.
             if (cause != error.DatabaseError) self.reusable = false;
+            if (!self.reusable) self.transaction_status = .unknown;
             if (cause == error.Canceled) @import("cancel.zig").run(self.io, self.address, self.cancel_key, self.stream);
             return cause;
         };
+    }
+
+    /// One joined cleanup owner, including an already-canceled caller. The
+    /// rollback task bypasses query's separate cancellation helper so expiry
+    /// cannot start a second cleanup budget. The borrower releases/discards.
+    pub fn rollbackCleanup(self: *PgClient) void {
+        if (!self.reusable) return;
+        const protection = self.io.swapCancelProtection(.blocked);
+        defer _ = self.io.swapCancelProtection(protection);
+        const saved = self.last_diagnostic;
+        defer self.last_diagnostic = saved;
+        const end = std.Io.Timestamp.now(self.io, .awake).addDuration(.fromMilliseconds(500));
+        const Done = union(enum) { rollback: anyerror!void, timeout: std.Io.Cancelable!void };
+        const completed = done: {
+            var storage: [2]Done = undefined;
+            var select = std.Io.Select(Done).init(self.io, &storage);
+            defer select.cancelDiscard();
+            select.concurrent(.rollback, rollbackTask, .{self}) catch break :done false;
+            select.concurrent(.timeout, waitUntil, .{ self.io, end }) catch break :done false;
+            switch (select.await() catch break :done false) {
+                .rollback => |result| {
+                    result catch break :done false;
+                    break :done true;
+                },
+                .timeout => break :done false,
+            }
+        };
+        if (!completed) {
+            self.reusable = false;
+            self.transaction_status = .unknown;
+        }
+    }
+
+    fn rollbackTask(self: *PgClient) !void {
+        const protection = self.io.swapCancelProtection(.unblocked);
+        defer _ = self.io.swapCancelProtection(protection);
+        var result = try self.queryInternal("ROLLBACK");
+        defer result.deinit();
+        if (self.transaction_status != .idle or !std.mem.eql(u8, result.command_tag, "ROLLBACK")) return error.ProtocolViolation;
+    }
+
+    fn waitUntil(io: std.Io, end: std.Io.Timestamp) std.Io.Cancelable!void {
+        const now = std.Io.Timestamp.now(io, .awake);
+        if (now.nanoseconds < end.nanoseconds) try io.sleep(now.durationTo(end), .awake);
     }
 
     fn ioError(self: *PgClient, err: anyerror) anyerror {
@@ -364,6 +413,7 @@ pub const PgClient = struct {
 
     fn queryInternal(self: *PgClient, sql: []const u8) !PgResult {
         self.last_diagnostic = null;
+        self.transaction_status = .unknown;
         const writer = &self.net_writer.interface;
         const reader = &self.net_reader.interface;
 
@@ -459,7 +509,13 @@ pub const PgClient = struct {
                     command_tag = next_tag;
                 },
                 'Z' => {
-                    _ = try self.readByte();
+                    if (payload_len != 1) return PgError.ProtocolViolation;
+                    self.transaction_status = switch (try self.readByte()) {
+                        'I' => .idle,
+                        'T' => .transaction,
+                        'E' => .failed_transaction,
+                        else => return PgError.ProtocolViolation,
+                    };
                     query_done = true;
                 },
                 'E' => {

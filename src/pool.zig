@@ -123,7 +123,7 @@ pub const Pool = struct {
     }
 
     pub fn release(self: *Pool, client: *PgClient) void {
-        if (!client.reusable) return self.discard(client);
+        if (!client.reusable or client.transaction_status != .idle) return self.discard(client);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
