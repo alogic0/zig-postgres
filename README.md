@@ -1,6 +1,6 @@
 # PostgreSQL module
 
-Local Zig 0.17.0 package exporting `postgres`. It builds with the Zig standard library.
+Version0.2.0, Zig0.17.0 package exporting `postgres`. It builds with the Zig standard library.
 
 From this directory:
 
@@ -138,3 +138,20 @@ before buffers/client ownership return to the caller.
 `zig build build-wire-check` compiles an independent opt-in receipt checker for
 the backend's framed protocol relay. It checks the real delayed commit and
 Execute-success/Sync-failure sequence and rejects four receipt corruptions.
+
+
+Accepted capability set for0.2.0 (PG0–PG3):
+
+| Capability | Status |
+| --- | --- |
+| Numeric/localhost TCP; trust/password/SCRAM-SHA-256 | Supported |
+| Owned text/null results, simple multi-statements | Supported |
+| Single-statement bound scalar/UUID/bytea parameters | Supported |
+| Transaction-aware pool release and bounded rollback | Supported |
+| Query/sequence operation deadlines; separate error cleanup | Supported |
+| DNS/TLS/general connect-pool-auth deadlines | Later consumer milestones |
+| Streaming/column metadata/binary results/COPY | Outside this release |
+
+Debug/ReleaseSafe driver and selected native note API/SQL checks use PostgreSQL16.13.
+This records one tested server version. The [changelog](CHANGELOG.md) identifies
+feature boundaries and the consumer rollback requirement. Pin the source archive with its package hash.
