@@ -1,4 +1,4 @@
-//! Native PostgreSQL wire protocol v3 client with SCRAM-SHA-256 and MD5 authentication.
+//! Native PostgreSQL wire protocol v3 client with trust, password and SCRAM authentication.
 const std = @import("std");
 const diagnostic = @import("diagnostic.zig");
 const Scram = @import("scram.zig");

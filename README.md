@@ -32,7 +32,8 @@ invalidates a borrower. Transaction cleanup rolls back an uncommitted
 reusable client. A lost COMMIT response remains ambiguous.
 
 This is the existing bounded wire-v3 client, not a complete PostgreSQL driver.
-It supports text simple queries and the existing trust/cleartext/MD5/SCRAM paths.
+It supports text simple queries and trust/cleartext/SCRAM-SHA-256 authentication.
+MD5 authentication is unsupported and returns `UnsupportedAuthType`.
 It has no parameter binding, TLS/channel binding, DNS resolution beyond the
 existing localhost/numeric-address support, or general retry policy. Startup
 authentication payloads retain their 1024-byte bound; SASLprep, iteration CPU
@@ -41,3 +42,12 @@ adds no new protocol or production acceptance.
 
 Application SQL, schemas, repositories, startup policy, after-commit effects and
 disposable database ownership remain outside this package.
+
+`query` fully consumes the response and allocates owned text/null cells. Results
+remain valid across subsequent queries until `deinit`; the current row API has
+no column metadata. Pool destruction requires all borrowers to have returned.
+Borrowers that change session settings, create temporary objects or hold session
+advisory locks must restore their state or call `Pool.discard`. The pool does not
+perform a full session reset. Current transaction-status tracking and bounded
+rollback gaps are recorded in the
+[development receipt](../../scripts/postgres_development.md).
