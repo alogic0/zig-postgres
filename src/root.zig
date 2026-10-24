@@ -7,6 +7,10 @@ pub const cancel = @import("cancel.zig");
 pub const transaction = @import("transaction.zig");
 pub const protocol = @import("protocol.zig");
 pub const Limits = protocol.Limits;
+pub const parameters = @import("parameters.zig");
+pub const Uuid = parameters.Uuid;
+pub const Binary = parameters.Binary;
+pub const QueryOptions = client.QueryOptions;
 
 pub const PgClient = client.PgClient;
 pub const PgError = client.PgError;

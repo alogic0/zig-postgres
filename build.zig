@@ -25,6 +25,8 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&probe.step);
     check.dependOn(&tests.step);
 
+    const wire = b.addExecutable(.{ .name = "postgres-wire-check", .root_module = b.createModule(.{ .root_source_file = b.path("examples/wire_check.zig"), .target = target, .optimize = optimize }) });
+    b.step("build-wire-check", "Compile the independent opt-in wire receipt checker").dependOn(&b.addInstallArtifact(wire, .{}).step);
     const live = b.addExecutable(.{
         .name = "postgres-verify",
         .root_module = b.createModule(.{

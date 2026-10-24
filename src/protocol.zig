@@ -11,6 +11,9 @@ pub const Limits = struct {
     max_result_bytes: usize = 64 * 1024 * 1024,
     max_rows: usize = 100000,
     max_columns: usize = 1024,
+    max_parameters: usize = 1024,
+    /// All Parse/Bind/Describe/Execute/Sync bytes, including frame overhead.
+    max_request_bytes: usize = 32 * 1024 * 1024,
 
     pub fn sql(self: Limits, value: []const u8) Error!void {
         if (value.len > self.max_sql_bytes or value.len > std.math.maxInt(i32) - 5) return error.SqlTooLarge;

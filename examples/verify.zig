@@ -253,7 +253,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (checked.deinitLog(false) != 0) @panic("PostgreSQL verifier leaked allocations");
     const config: pg.PoolConfig = .{
         .host = "127.0.0.1",
-        .port = 5433,
+        .port = try std.fmt.parseInt(u16, init.environ_map.get("POSTGRES_TEST_PORT") orelse "5433", 10),
         .user = init.environ_map.get("PGUSER") orelse return error.PGUSERRequired,
         .password = init.environ_map.get("PGPASSWORD") orelse return error.PGPASSWORDRequired,
         .database = database,
@@ -263,8 +263,9 @@ pub fn main(init: std.process.Init) !void {
     if (expected.len == 0) return error.OwnedDatabaseRequired;
     const elapsed = try verify(checked.allocator(), init.io, config, expected);
     const protocol_result = try protocol_cases.run(checked.allocator(), init.io, config);
+    const parameter_result = try @import("parameter_cases.zig").run(checked.allocator(), init.io, config);
     const report = try std.json.Stringify.valueAlloc(init.arena.allocator(), .{
-        .milestone = "PG2",
+        .milestone = "PG3",
         .database = database,
         .compiler = @import("builtin").zig_version_string,
         .optimize = @tagName(@import("builtin").mode),
@@ -274,7 +275,8 @@ pub fn main(init: std.process.Init) !void {
         .fixture_scheduling_allowance_ms = 250,
         .client_leaks = @as(usize, 0),
         .protocol = protocol_result,
+        .parameters = parameter_result,
     }, .{ .whitespace = .indent_2 });
     try Io.Dir.cwd().writeFile(init.io, .{ .sub_path = report_path, .data = report });
-    std.debug.print("PASS PG1/PG2: 9 ownership and 31 protocol case groups, zero owned leaks\n", .{});
+    std.debug.print("PASS PG1/PG2/PG3: ownership, protocol and parameters, zero owned leaks\n", .{});
 }

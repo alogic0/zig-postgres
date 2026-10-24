@@ -3,7 +3,9 @@ const std = @import("std");
 const diagnostic = @import("diagnostic.zig");
 const Scram = @import("scram.zig");
 const protocol = @import("protocol.zig");
+const parameters = @import("parameters.zig");
 pub const Limits = protocol.Limits;
+pub const QueryOptions = struct { deadline: ?std.Io.Timestamp = null };
 
 pub const PgError = error{
     ConnectionFailed,
@@ -74,6 +76,7 @@ pub const PgClient = struct {
     transaction_status: TransactionStatus = .unknown,
     limits: Limits = .{},
     cleanup_deadline: ?std.Io.Timestamp = null,
+    operation_deadline: ?std.Io.Timestamp = null,
     address: ?std.Io.net.IpAddress = null,
     cancel_key: ?@import("cancel.zig").Key = null,
 
@@ -349,17 +352,62 @@ pub const PgClient = struct {
     }
 
     pub fn query(self: *PgClient, sql: []const u8) !PgResult {
+        return self.queryOpts(sql, .{});
+    }
+
+    pub const DeadlineScope = struct {
+        client: *PgClient,
+        previous: ?std.Io.Timestamp,
+        pub fn deinit(self: DeadlineScope) void {
+            self.client.operation_deadline = self.previous;
+        }
+    };
+
+    /// Scopes a sequence, including a legacy COMMIT, without resetting its clock.
+    pub fn withDeadline(self: *PgClient, end: ?std.Io.Timestamp) DeadlineScope {
+        const scope: DeadlineScope = .{ .client = self, .previous = self.operation_deadline };
+        if (end) |next| {
+            if (self.operation_deadline == null or next.nanoseconds < self.operation_deadline.?.nanoseconds) self.operation_deadline = next;
+        }
+        return scope;
+    }
+
+    fn checkDeadline(self: *PgClient) !void {
+        if (self.operation_deadline) |end| if (std.Io.Timestamp.now(self.io, .awake).nanoseconds >= end.nanoseconds) return error.Timeout;
+    }
+
+    pub fn queryOpts(self: *PgClient, sql: []const u8, options: QueryOptions) !PgResult {
+        const scope = self.withDeadline(options.deadline);
+        defer scope.deinit();
+        try self.checkDeadline();
         if (!self.reusable) return error.ConnectionFailed;
         try self.limits.sql(sql);
-        return self.queryInternal(sql) catch |err| {
-            const cause = self.ioError(err);
-            // DatabaseError is returned only after ReadyForQuery. Every other
-            // failure may leave a partial frame; no later query may reuse it.
-            if (cause != error.DatabaseError) self.reusable = false;
-            if (!self.reusable) self.transaction_status = .unknown;
-            if (cause == error.Canceled or cause == error.Timeout) @import("cancel.zig").runUntil(self.io, self.address, self.cancel_key, self.stream, self.cleanup_deadline orelse std.Io.Timestamp.now(self.io, .awake).addDuration(.fromMilliseconds(500)));
-            return cause;
-        };
+        return self.queryInternal(sql) catch |err| return self.exchangeError(err);
+    }
+
+    pub fn queryParams(self: *PgClient, sql: []const u8, values: anytype) !PgResult {
+        return self.queryParamsOpts(sql, values, .{});
+    }
+
+    pub fn queryParamsOpts(self: *PgClient, sql: []const u8, values: anytype, options: QueryOptions) !PgResult {
+        const scope = self.withDeadline(options.deadline);
+        defer scope.deinit();
+        try self.checkDeadline();
+        if (!self.reusable) return error.ConnectionFailed;
+        const packet = try parameters.request(self.allocator, self.limits, sql, values);
+        defer self.allocator.free(packet);
+        try self.checkDeadline();
+        self.beginExchange();
+        self.writeQuery(packet, false) catch |err| return self.exchangeError(err);
+        return self.readResult(true) catch |err| return self.exchangeError(err);
+    }
+
+    fn exchangeError(self: *PgClient, err: anyerror) anyerror {
+        const cause = self.ioError(err);
+        if (cause != error.DatabaseError) self.reusable = false;
+        if (!self.reusable) self.transaction_status = .unknown;
+        if (cause == error.Canceled or cause == error.Timeout) @import("cancel.zig").runUntil(self.io, self.address, self.cancel_key, self.stream, self.cleanup_deadline orelse std.Io.Timestamp.now(self.io, .awake).addDuration(.fromMilliseconds(500)));
+        return cause;
     }
 
     /// One joined cleanup owner, including an already-canceled caller. The
@@ -371,6 +419,9 @@ pub const PgClient = struct {
         defer _ = self.io.swapCancelProtection(protection);
         const saved = self.last_diagnostic;
         defer self.last_diagnostic = saved;
+        const operation_end = self.operation_deadline;
+        self.operation_deadline = null;
+        defer self.operation_deadline = operation_end;
         const end = std.Io.Timestamp.now(self.io, .awake).addDuration(.fromMilliseconds(500));
         const Done = union(enum) { rollback: anyerror!void, timeout: std.Io.Cancelable!void };
         const completed = done: {
@@ -417,22 +468,48 @@ pub const PgClient = struct {
     }
 
     fn queryInternal(self: *PgClient, sql: []const u8) !PgResult {
+        self.beginExchange();
+        try self.writeQuery(sql, true);
+        return self.readResult(false);
+    }
+
+    fn beginExchange(self: *PgClient) void {
         self.last_diagnostic = null;
         self.cleanup_deadline = null;
         self.transaction_status = .unknown;
+    }
+
+    fn writeTask(self: *PgClient, bytes: []const u8, simple: bool) !void {
+        const protection = self.io.swapCancelProtection(.unblocked);
+        defer _ = self.io.swapCancelProtection(protection);
         const writer = &self.net_writer.interface;
-        var header: [5]u8 = undefined;
-        header[0] = 'Q';
-        std.mem.writeInt(u32, header[1..5], @intCast(4 + sql.len + 1), .big);
-        try writer.writeAll(&header);
-        try writer.writeAll(sql);
-        try writer.writeByte(0);
+        if (simple) {
+            var header: [5]u8 = undefined;
+            header[0] = 'Q';
+            std.mem.writeInt(u32, header[1..5], @intCast(5 + bytes.len), .big);
+            try writer.writeAll(&header);
+        }
+        try writer.writeAll(bytes);
+        if (simple) try writer.writeByte(0);
         try writer.flush();
-        return self.readResult();
+    }
+
+    fn writeQuery(self: *PgClient, bytes: []const u8, simple: bool) !void {
+        const end = self.operation_deadline orelse return self.writeTask(bytes, simple);
+        const Done = union(enum) { write: anyerror!void, timeout: std.Io.Cancelable!void };
+        var storage: [2]Done = undefined;
+        var select = std.Io.Select(Done).init(self.io, &storage);
+        defer select.cancelDiscard();
+        try select.concurrent(.write, writeTask, .{ self, bytes, simple });
+        try select.concurrent(.timeout, waitUntil, .{ self.io, end });
+        return switch (try select.await()) {
+            .write => |result| result,
+            .timeout => error.Timeout,
+        };
     }
 
     fn readQueryBytes(self: *PgClient, bytes: []u8) !void {
-        const end = self.cleanup_deadline orelse return self.net_reader.interface.readSliceAll(bytes);
+        const end = self.cleanup_deadline orelse self.operation_deadline orelse return self.net_reader.interface.readSliceAll(bytes);
         if (std.Io.Timestamp.now(self.io, .awake).nanoseconds >= end.nanoseconds) return error.Timeout;
         const Done = union(enum) { read: anyerror!void, timeout: std.Io.Cancelable!void };
         var storage: [2]Done = undefined;
@@ -452,7 +529,7 @@ pub const PgClient = struct {
         try self.net_reader.interface.readSliceAll(bytes);
     }
 
-    fn readResult(self: *PgClient) !PgResult {
+    fn readResult(self: *PgClient, extended: bool) !PgResult {
         var rows_list: std.ArrayList(PgRow) = .empty;
         errdefer {
             for (rows_list.items) |*row| row.deinit();
@@ -465,6 +542,7 @@ pub const PgClient = struct {
         var completed = false;
         var columns: ?u16 = null;
         var owned_bytes: usize = 0;
+        var phase: enum { parse, bind, describe, execute } = if (extended) .parse else .execute;
         while (true) {
             var header: [5]u8 = undefined;
             try self.readQueryBytes(&header);
@@ -476,12 +554,27 @@ pub const PgClient = struct {
             var cursor: protocol.Cursor = .{ .bytes = body };
             if (has_error and std.mem.indexOfScalar(u8, "ZNS", header[0]) == null) return error.ProtocolViolation;
             switch (header[0]) {
+                '1' => {
+                    if (!extended or phase != .parse or body.len != 0) return error.ProtocolViolation;
+                    phase = .bind;
+                },
+                '2' => {
+                    if (!extended or phase != .bind or body.len != 0) return error.ProtocolViolation;
+                    phase = .describe;
+                },
+                'n' => {
+                    if (!extended or phase != .describe or body.len != 0) return error.ProtocolViolation;
+                    phase = .execute;
+                },
                 'T' => {
+                    if (extended and phase != .describe) return error.ProtocolViolation;
                     if (columns != null) return error.ProtocolViolation;
                     columns = try protocol.description(body, self.limits);
+                    phase = .execute;
                     completed = false;
                 },
                 'D' => {
+                    if (phase != .execute or completed) return error.ProtocolViolation;
                     const num_cols = try cursor.int(u16);
                     if (num_cols != (columns orelse return error.ProtocolViolation)) return error.ProtocolViolation;
                     if (num_cols > self.limits.max_columns) return error.ColumnLimit;
@@ -510,6 +603,7 @@ pub const PgClient = struct {
                     });
                 },
                 'C' => {
+                    if (phase != .execute or (extended and completed)) return error.ProtocolViolation;
                     const tag = try cursor.string();
                     try cursor.end();
                     if (tag.len == 0) return error.ProtocolViolation;
@@ -545,6 +639,7 @@ pub const PgClient = struct {
                     try cursor.end();
                 },
                 'I' => {
+                    if (phase != .execute) return error.ProtocolViolation;
                     if (body.len != 0 or columns != null) return error.ProtocolViolation;
                     completed = true;
                 },

@@ -17,8 +17,9 @@ pub fn main(init: std.process.Init) !void {
     defer pool.release(client);
     var transaction = try postgres.Transaction.begin(client);
     defer transaction.deinit();
-    var result = try client.query("SELECT 1");
+    var result = try client.queryParams("SELECT $1::bigint, $2::text, $3::boolean", .{ @as(i64, 1), "prospect's follow-up", true });
     defer result.deinit();
     if (result.rows.len != 1 or try result.rows[0].getInt(0, i64) != 1) return error.UnexpectedResult;
+    if (!std.mem.eql(u8, result.rows[0].get(1).?, "prospect's follow-up") or try result.rows[0].getBool(2) != true) return error.UnexpectedResult;
     try transaction.commit();
 }

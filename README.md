@@ -13,7 +13,7 @@ zig build check test -Doptimize=ReleaseSafe
 The default builds `zig-out/bin/postgres-probe`, a public-API consumer. Building
 and offline tests open no database connections. Running the probe explicitly
 uses `PGUSER`, `PGPASSWORD`, `PGDATABASE` and optional `PGHOST`/`PGPORT`; it executes
-`BEGIN`, `SELECT 1`, `COMMIT`. Live authentication and cancellation regressions
+`BEGIN`, bound `SELECT $1::bigint`, `COMMIT`. Live authentication and cancellation regressions
 remain owned by the backend fixtures.
 
 Consumers add a `postgres` path dependency on this directory and import
@@ -36,9 +36,9 @@ failed or expired cleanup invalidates the connection. A lost COMMIT response
 remains ambiguous; successful commit waiting does not use the cleanup timeout.
 
 This is the existing bounded wire-v3 client, not a complete PostgreSQL driver.
-It supports text simple queries and trust/cleartext/SCRAM-SHA-256 authentication.
+It supports text simple/parameterized queries and trust/cleartext/SCRAM-SHA-256 authentication.
 MD5 authentication is unsupported and returns `UnsupportedAuthType`.
-It has no parameter binding, TLS/channel binding, DNS resolution beyond the
+It has no TLS/channel binding, DNS resolution beyond the
 existing localhost/numeric-address support, or general retry policy. Startup
 authentication payloads retain their 1024-byte bound; SASLprep and iteration CPU
 budgets remain unsupported. Simple-query frames now validate lengths, row
@@ -64,8 +64,10 @@ gaps are recorded in the [development receipt](../../scripts/postgres_developmen
 The opt-in verifier requires `POSTGRES_TEST_DATABASE` from the backend's existing
 disposable schema lease and `POSTGRES_TEST_REPORT` for its JSON report. It checks
 the exact database ownership marker before writes, uses the local acceptance
-PostgreSQL endpoint, and rejects unowned databases. Run one verifier per lease at
-a time. The verifier owns only its `pg_development_rows` table and loopback peers;
+PostgreSQL endpoint (optional `POSTGRES_TEST_PORT` for its owned relay), and
+rejects unowned databases. Run one verifier per lease at
+a time. The verifier owns its `pg_development_rows`/`pg3_values` tables, commit-delay
+function and loopback peers;
 the existing schema process owns database creation, migration and removal.
 
 Set `client.limits` before queries or pass `.limits` in `PoolConfig`. SQL admission
@@ -89,3 +91,50 @@ concatenate rows from multiple statements and returns the last command tag.
 An error returns no partial result, including a later failure after earlier
 statements completed. Notices and parameter status are consumed without retaining
 server message text. Binary-format results and COPY are explicitly unsupported.
+
+`queryParams(sql, tuple)` binds a single statement using unnamed Parse/Bind/
+Describe/Execute and exactly one Sync. SQL and values travel separately. The
+server rejects multiple statements; semicolons inside literals/values work.
+The API returns the same owned `PgResult` and waits through ReadyForQuery,
+including implicit commit and deferred constraints. Parse/Bind/Execute/Sync errors
+retain SQLSTATE. A synchronized error inside a transaction remains failed until
+explicit rollback; Sync does not roll back that transaction. No request is replayed.
+
+```zig
+var result = try client.queryParams(
+    "SELECT $1::text, $2::boolean",
+    .{ "prospect's follow-up", true },
+);
+defer result.deinit();
+```
+
+Values admit null/typed null, bool, integers representable by signed bigint,
+byte strings, `Uuid{ .bytes = [16]u8{...} }` and `Binary{ .bytes = bytes }`.
+Binary binds bytea hex text, including zero bytes; ordinary text/SQL reject NUL.
+Use explicit SQL casts for null/custom types, exact decimal and timestamp text.
+Floats, general arrays and arbitrary structs are unsupported. Preflight checks
+all types/counts/encoded lengths and allocates the complete request before I/O;
+rejection leaves transaction state unchanged. Defaults:1024parameters and32MiB
+for all encoded request bytes, configurable through `Limits`. Each wire length
+also fits its signed field. Result format remains text.
+
+`queryParamsOpts(sql, tuple, .{ .deadline = end })` accepts an optional absolute
+`std.Io.Timestamp` from the awake clock. The operation deadline covers admission,
+request write and the final validated ReadyForQuery. The convenience call imposes
+no operation timeout. `queryOpts` provides the same bound for legacy SQL;
+`const scope = client.withDeadline(end); defer scope.deinit();` bounds a sequence,
+including explicit COMMIT. Nested scopes/options can only tighten the deadline.
+Bounded in-memory admission finishes before its deadline is checked again.
+
+Normal Execute/CommandComplete never starts a cleanup timer. A slow successful
+commit may exceed500ms within the operation deadline. On observed server error,
+cancellation or operation expiry, cleanup gets its separate absolute500ms bound;
+partial reads/helpers cannot restart it. Error recovery can therefore outlast the
+operation deadline by that allowance. Failed/incomplete recovery invalidates;
+response loss during commit remains an unknown outcome. Rollback cleanup ignores
+an expired normal scope and uses its own joined budget. All joined I/O tasks finish
+before buffers/client ownership return to the caller.
+
+`zig build build-wire-check` compiles an independent opt-in receipt checker for
+the backend's framed protocol relay. It checks the real delayed commit and
+Execute-success/Sync-failure sequence and rejects four receipt corruptions.
