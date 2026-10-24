@@ -40,9 +40,14 @@ It supports text simple queries and trust/cleartext/SCRAM-SHA-256 authentication
 MD5 authentication is unsupported and returns `UnsupportedAuthType`.
 It has no parameter binding, TLS/channel binding, DNS resolution beyond the
 existing localhost/numeric-address support, or general retry policy. Startup
-authentication payloads retain their 1024-byte bound; SASLprep, iteration CPU
-budgets and broader malformed query-frame acceptance remain unproved. Packaging
-adds no new protocol or production acceptance.
+authentication payloads retain their 1024-byte bound; SASLprep and iteration CPU
+budgets remain unsupported. Simple-query frames now validate lengths, row
+descriptions, text cells, command/error terminators and ready status. Unsupported
+protocol states invalidate the connection. Raw server message bytes are not
+printed; diagnostics retain only owned SQLSTATE and the existing cached-query
+signal. Error-response recovery has its own joined 500 ms bound. Normal successful
+query/commit waiting has no cleanup timeout. Selected acceptance is recorded in
+the development receipt; broader protocol and product acceptance remain separate.
 
 Application SQL, schemas, repositories, startup policy, after-commit effects and
 disposable database ownership remain outside this package.
@@ -62,3 +67,25 @@ the exact database ownership marker before writes, uses the local acceptance
 PostgreSQL endpoint, and rejects unowned databases. Run one verifier per lease at
 a time. The verifier owns only its `pg_development_rows` table and loopback peers;
 the existing schema process owns database creation, migration and removal.
+
+Set `client.limits` before queries or pass `.limits` in `PoolConfig`. SQL admission
+fails before sending and preserves connection/transaction state. Response limit,
+allocation, framing or incomplete-I/O failures invalidate the connection; pool
+release discards it. The defaults are:
+
+| Limit | Default |
+| --- | --- |
+| SQL text | 16 MiB |
+| Whole message including tag/length | 16 MiB |
+| One text cell | 8 MiB |
+| Logical retained row/cell/command-tag bytes | 64 MiB |
+| Rows across all results in a simple query | 100000 |
+| Columns in one row set | 1024 |
+
+The transient frame buffer and row-list spare capacity are additional bounded
+allocations. SQL and message limits also respect the wire's signed length fields
+even if configured higher. The materialized simple-query API continues to
+concatenate rows from multiple statements and returns the last command tag.
+An error returns no partial result, including a later failure after earlier
+statements completed. Notices and parameter status are consumed without retaining
+server message text. Binary-format results and COPY are explicitly unsupported.

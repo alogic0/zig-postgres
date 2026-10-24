@@ -13,6 +13,7 @@ pub const PoolConfig = struct {
     password: []const u8 = "",
     database: []const u8 = "postgres",
     size: u32 = 5,
+    limits: client_mod.Limits = .{},
 };
 
 pub const Pool = struct {
@@ -100,7 +101,9 @@ pub const Pool = struct {
     }
 
     fn connect(self: *Pool) !*PgClient {
-        return PgClient.connect(self.allocator, self.io, self.config.host, self.config.port, self.config.user, self.config.password, self.config.database);
+        const client = try PgClient.connect(self.allocator, self.io, self.config.host, self.config.port, self.config.user, self.config.password, self.config.database);
+        client.limits = self.config.limits;
+        return client;
     }
 
     /// Consume an acquired connection whose protocol state is no longer safe

@@ -4,6 +4,7 @@ const std = @import("std");
 const pg = @import("postgres");
 const Io = std.Io;
 const A = std.mem.Allocator;
+const protocol_cases = @import("protocol_cases.zig");
 
 fn require(ok: bool) !void {
     if (!ok) return error.AssertionFailed;
@@ -250,11 +251,20 @@ pub fn main(init: std.process.Init) !void {
     const report_path = init.environ_map.get("POSTGRES_TEST_REPORT") orelse return error.ReportPathRequired;
     var checked = std.heap.SafeAllocator.init(std.heap.page_allocator, .{});
     defer if (checked.deinitLog(false) != 0) @panic("PostgreSQL verifier leaked allocations");
+    const config: pg.PoolConfig = .{
+        .host = "127.0.0.1",
+        .port = 5433,
+        .user = init.environ_map.get("PGUSER") orelse return error.PGUSERRequired,
+        .password = init.environ_map.get("PGPASSWORD") orelse return error.PGPASSWORDRequired,
+        .database = database,
+        .size = 1,
+    };
     const expected = init.environ_map.get("POSTGRES_TEST_MARKER") orelse try std.fmt.allocPrint(init.arena.allocator(), "zig-postgres disposable schema fixture {s}", .{database});
     if (expected.len == 0) return error.OwnedDatabaseRequired;
-    const elapsed = try verify(checked.allocator(), init.io, .{ .host = "127.0.0.1", .port = 5433, .user = init.environ_map.get("PGUSER") orelse return error.PGUSERRequired, .password = init.environ_map.get("PGPASSWORD") orelse return error.PGPASSWORDRequired, .database = database, .size = 1 }, expected);
+    const elapsed = try verify(checked.allocator(), init.io, config, expected);
+    const protocol_result = try protocol_cases.run(checked.allocator(), init.io, config);
     const report = try std.json.Stringify.valueAlloc(init.arena.allocator(), .{
-        .milestone = "PG1",
+        .milestone = "PG2",
         .database = database,
         .compiler = @import("builtin").zig_version_string,
         .optimize = @tagName(@import("builtin").mode),
@@ -263,7 +273,8 @@ pub fn main(init: std.process.Init) !void {
         .cleanup_budget_ms = 500,
         .fixture_scheduling_allowance_ms = 250,
         .client_leaks = @as(usize, 0),
+        .protocol = protocol_result,
     }, .{ .whitespace = .indent_2 });
     try Io.Dir.cwd().writeFile(init.io, .{ .sub_path = report_path, .data = report });
-    std.debug.print("PASS PG1: 9 cases, both stalled rollback caller states, zero owned leaks\n", .{});
+    std.debug.print("PASS PG1/PG2: 9 ownership and 31 protocol case groups, zero owned leaks\n", .{});
 }

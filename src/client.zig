@@ -2,6 +2,8 @@
 const std = @import("std");
 const diagnostic = @import("diagnostic.zig");
 const Scram = @import("scram.zig");
+const protocol = @import("protocol.zig");
+pub const Limits = protocol.Limits;
 
 pub const PgError = error{
     ConnectionFailed,
@@ -11,7 +13,7 @@ pub const PgError = error{
     ProtocolViolation,
     UnexpectedEof,
     BufferTooSmall,
-};
+} || protocol.Error;
 
 pub const TransactionStatus = enum { unknown, idle, transaction, failed_transaction };
 
@@ -70,6 +72,8 @@ pub const PgClient = struct {
     /// An incomplete exchange cannot safely be returned to a connection pool.
     reusable: bool = true,
     transaction_status: TransactionStatus = .unknown,
+    limits: Limits = .{},
+    cleanup_deadline: ?std.Io.Timestamp = null,
     address: ?std.Io.net.IpAddress = null,
     cancel_key: ?@import("cancel.zig").Key = null,
 
@@ -346,13 +350,14 @@ pub const PgClient = struct {
 
     pub fn query(self: *PgClient, sql: []const u8) !PgResult {
         if (!self.reusable) return error.ConnectionFailed;
+        try self.limits.sql(sql);
         return self.queryInternal(sql) catch |err| {
             const cause = self.ioError(err);
             // DatabaseError is returned only after ReadyForQuery. Every other
             // failure may leave a partial frame; no later query may reuse it.
             if (cause != error.DatabaseError) self.reusable = false;
             if (!self.reusable) self.transaction_status = .unknown;
-            if (cause == error.Canceled) @import("cancel.zig").run(self.io, self.address, self.cancel_key, self.stream);
+            if (cause == error.Canceled or cause == error.Timeout) @import("cancel.zig").runUntil(self.io, self.address, self.cancel_key, self.stream, self.cleanup_deadline orelse std.Io.Timestamp.now(self.io, .awake).addDuration(.fromMilliseconds(500)));
             return cause;
         };
     }
@@ -413,11 +418,9 @@ pub const PgClient = struct {
 
     fn queryInternal(self: *PgClient, sql: []const u8) !PgResult {
         self.last_diagnostic = null;
+        self.cleanup_deadline = null;
         self.transaction_status = .unknown;
         const writer = &self.net_writer.interface;
-        const reader = &self.net_reader.interface;
-
-        // Send 'Q' - stream query without fixed buffer limitations
         var header: [5]u8 = undefined;
         header[0] = 'Q';
         std.mem.writeInt(u32, header[1..5], @intCast(4 + sql.len + 1), .big);
@@ -425,8 +428,31 @@ pub const PgClient = struct {
         try writer.writeAll(sql);
         try writer.writeByte(0);
         try writer.flush();
+        return self.readResult();
+    }
 
-        // Read results
+    fn readQueryBytes(self: *PgClient, bytes: []u8) !void {
+        const end = self.cleanup_deadline orelse return self.net_reader.interface.readSliceAll(bytes);
+        if (std.Io.Timestamp.now(self.io, .awake).nanoseconds >= end.nanoseconds) return error.Timeout;
+        const Done = union(enum) { read: anyerror!void, timeout: std.Io.Cancelable!void };
+        var storage: [2]Done = undefined;
+        var select = std.Io.Select(Done).init(self.io, &storage);
+        defer select.cancelDiscard();
+        try select.concurrent(.read, readTask, .{ self, bytes });
+        try select.concurrent(.timeout, waitUntil, .{ self.io, end });
+        return switch (try select.await()) {
+            .read => |result| result,
+            .timeout => error.Timeout,
+        };
+    }
+
+    fn readTask(self: *PgClient, bytes: []u8) !void {
+        const protection = self.io.swapCancelProtection(.unblocked);
+        defer _ = self.io.swapCancelProtection(protection);
+        try self.net_reader.interface.readSliceAll(bytes);
+    }
+
+    fn readResult(self: *PgClient) !PgResult {
         var rows_list: std.ArrayList(PgRow) = .empty;
         errdefer {
             for (rows_list.items) |*row| row.deinit();
@@ -435,133 +461,95 @@ pub const PgClient = struct {
 
         var command_tag: []const u8 = "";
         errdefer self.allocator.free(command_tag);
-        var query_done = false;
         var has_error = false;
-
-        while (!query_done) {
-            const msg_type = try self.readByte();
-            var len_buf: [4]u8 = undefined;
-            try reader.readSliceAll(&len_buf);
-            const msg_len = std.mem.readInt(u32, &len_buf, .big);
-            const payload_len = msg_len - 4;
-
-            switch (msg_type) {
+        var completed = false;
+        var columns: ?u16 = null;
+        var owned_bytes: usize = 0;
+        while (true) {
+            var header: [5]u8 = undefined;
+            try self.readQueryBytes(&header);
+            const length = try protocol.payloadSize(std.mem.readInt(u32, header[1..5], .big), self.limits);
+            if (header[0] == 'E' and self.cleanup_deadline == null) self.cleanup_deadline = std.Io.Timestamp.now(self.io, .awake).addDuration(.fromMilliseconds(500));
+            const body = try self.allocator.alloc(u8, length);
+            defer self.allocator.free(body);
+            try self.readQueryBytes(body);
+            var cursor: protocol.Cursor = .{ .bytes = body };
+            if (has_error and std.mem.indexOfScalar(u8, "ZNS", header[0]) == null) return error.ProtocolViolation;
+            switch (header[0]) {
                 'T' => {
-                    // RowDescription
-                    var remaining: usize = payload_len;
-                    var desc_buf: [1024]u8 = undefined;
-                    while (remaining > 0) {
-                        const chunk = @min(remaining, desc_buf.len);
-                        try reader.readSliceAll(desc_buf[0..chunk]);
-                        remaining -= chunk;
-                    }
+                    if (columns != null) return error.ProtocolViolation;
+                    columns = try protocol.description(body, self.limits);
+                    completed = false;
                 },
                 'D' => {
-                    // DataRow
-                    var num_cols_buf: [2]u8 = undefined;
-                    try reader.readSliceAll(&num_cols_buf);
-                    const num_cols = std.mem.readInt(u16, &num_cols_buf, .big);
-
+                    const num_cols = try cursor.int(u16);
+                    if (num_cols != (columns orelse return error.ProtocolViolation)) return error.ProtocolViolation;
+                    if (num_cols > self.limits.max_columns) return error.ColumnLimit;
+                    if (rows_list.items.len >= self.limits.max_rows) return error.RowLimit;
+                    owned_bytes = try self.limits.add(owned_bytes, @sizeOf(PgRow) + @as(usize, num_cols) * @sizeOf(?[]const u8));
                     const col_values = try self.allocator.alloc(?[]const u8, num_cols);
                     @memset(col_values, null);
                     errdefer {
                         for (col_values) |value| if (value) |bytes| self.allocator.free(bytes);
                         self.allocator.free(col_values);
                     }
-
                     for (0..num_cols) |col_idx| {
-                        var col_len_buf: [4]u8 = undefined;
-                        try reader.readSliceAll(&col_len_buf);
-                        const col_len = std.mem.readInt(i32, &col_len_buf, .big);
-
-                        if (col_len < 0) {
-                            col_values[col_idx] = null;
-                        } else {
-                            const val_buf = try self.allocator.alloc(u8, @intCast(col_len));
-                            errdefer self.allocator.free(val_buf);
-                            try reader.readSliceAll(val_buf);
-                            col_values[col_idx] = val_buf;
-                        }
+                        const size = try cursor.int(i32);
+                        if (size == -1) continue;
+                        if (size < 0) return error.ProtocolViolation;
+                        const cell_size: usize = @intCast(size);
+                        if (cell_size > self.limits.max_cell_bytes) return error.CellTooLarge;
+                        const value = try cursor.take(cell_size);
+                        owned_bytes = try self.limits.add(owned_bytes, cell_size);
+                        col_values[col_idx] = try self.allocator.dupe(u8, value);
                     }
-
+                    try cursor.end();
                     try rows_list.append(self.allocator, PgRow{
                         .allocator = self.allocator,
                         .values = col_values,
                     });
                 },
                 'C' => {
-                    // CommandComplete
-                    var raw_tag_buf: [256]u8 = undefined;
-                    const read_len = @min(payload_len, raw_tag_buf.len);
-                    try reader.readSliceAll(raw_tag_buf[0..read_len]);
-                    if (payload_len > read_len) {
-                        var remaining: usize = payload_len - read_len;
-                        var dummy: [256]u8 = undefined;
-                        while (remaining > 0) {
-                            const chunk = @min(remaining, dummy.len);
-                            try reader.readSliceAll(dummy[0..chunk]);
-                            remaining -= chunk;
-                        }
-                    }
-                    const end = std.mem.indexOfScalar(u8, raw_tag_buf[0..read_len], 0) orelse read_len;
-                    const next_tag = try self.allocator.dupe(u8, raw_tag_buf[0..end]);
+                    const tag = try cursor.string();
+                    try cursor.end();
+                    if (tag.len == 0) return error.ProtocolViolation;
+                    owned_bytes = try self.limits.add(owned_bytes - command_tag.len, tag.len);
+                    const next_tag = try self.allocator.dupe(u8, tag);
                     self.allocator.free(command_tag);
                     command_tag = next_tag;
+                    columns = null;
+                    completed = true;
                 },
                 'Z' => {
-                    if (payload_len != 1) return PgError.ProtocolViolation;
-                    self.transaction_status = switch (try self.readByte()) {
+                    if (body.len != 1 or (!has_error and !completed)) return error.ProtocolViolation;
+                    self.transaction_status = switch (body[0]) {
                         'I' => .idle,
                         'T' => .transaction,
                         'E' => .failed_transaction,
                         else => return PgError.ProtocolViolation,
                     };
-                    query_done = true;
+                    if (has_error) return error.DatabaseError;
+                    return .{ .allocator = self.allocator, .rows = try rows_list.toOwnedSlice(self.allocator), .command_tag = command_tag };
                 },
                 'E' => {
+                    try protocol.fields(body);
                     var parser: diagnostic.Parser = .{};
-                    var err_buf: [1024]u8 = undefined;
-                    const read_len = @min(payload_len, err_buf.len);
-                    try reader.readSliceAll(err_buf[0..read_len]);
-                    parser.feed(err_buf[0..read_len]);
-                    if (payload_len > read_len) {
-                        var remaining: usize = payload_len - read_len;
-                        var dummy: [256]u8 = undefined;
-                        while (remaining > 0) {
-                            const chunk = @min(remaining, dummy.len);
-                            try reader.readSliceAll(dummy[0..chunk]);
-                            parser.feed(dummy[0..chunk]);
-                            remaining -= chunk;
-                        }
-                    }
-                    var clean_err: [1024]u8 = undefined;
-                    for (err_buf[0..read_len], 0..) |b, i| {
-                        clean_err[i] = if (b == 0) ' ' else b;
-                    }
-                    std.debug.print("PostgreSQL Error: {s}\n", .{clean_err[0..read_len]});
+                    parser.feed(body);
                     self.last_diagnostic = parser.diagnostic;
                     has_error = true;
                 },
-                else => {
-                    var remaining: usize = payload_len;
-                    var discard: [1024]u8 = undefined;
-                    while (remaining > 0) {
-                        const chunk = @min(remaining, discard.len);
-                        try reader.readSliceAll(discard[0..chunk]);
-                        remaining -= chunk;
-                    }
+                'N' => try protocol.fields(body),
+                'S' => {
+                    _ = try cursor.string();
+                    _ = try cursor.string();
+                    try cursor.end();
                 },
+                'I' => {
+                    if (body.len != 0 or columns != null) return error.ProtocolViolation;
+                    completed = true;
+                },
+                else => return error.ProtocolViolation,
             }
         }
-
-        if (has_error) {
-            return PgError.DatabaseError;
-        }
-
-        return PgResult{
-            .allocator = self.allocator,
-            .rows = try rows_list.toOwnedSlice(self.allocator),
-            .command_tag = command_tag,
-        };
     }
 };

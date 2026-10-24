@@ -5,6 +5,8 @@ pub const scram = @import("scram.zig");
 pub const diagnostic = @import("diagnostic.zig");
 pub const cancel = @import("cancel.zig");
 pub const transaction = @import("transaction.zig");
+pub const protocol = @import("protocol.zig");
+pub const Limits = protocol.Limits;
 
 pub const PgClient = client.PgClient;
 pub const PgError = client.PgError;

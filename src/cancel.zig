@@ -29,10 +29,15 @@ fn terminate(io: std.Io, address: ?std.Io.net.IpAddress, key: ?Key, original: st
     var slices = [_][]u8{&buffer};
     while ((try original.readWithControl(io, &slices, &.{})).data_len != 0) {}
 }
-fn deadline(io: std.Io) std.Io.Cancelable!void {
-    try io.sleep(.fromMilliseconds(500), .awake);
+fn deadline(io: std.Io, end: std.Io.Timestamp) std.Io.Cancelable!void {
+    const now = std.Io.Timestamp.now(io, .awake);
+    if (now.nanoseconds < end.nanoseconds) try io.sleep(now.durationTo(end), .awake);
 }
 pub fn run(io: std.Io, address: ?std.Io.net.IpAddress, key: ?Key, original: std.Io.net.Stream) void {
+    runUntil(io, address, key, original, std.Io.Timestamp.now(io, .awake).addDuration(.fromMilliseconds(500)));
+}
+pub fn runUntil(io: std.Io, address: ?std.Io.net.IpAddress, key: ?Key, original: std.Io.net.Stream, end: std.Io.Timestamp) void {
+    if (std.Io.Timestamp.now(io, .awake).nanoseconds >= end.nanoseconds) return;
     // Query cancellation has already been acknowledged. Cleanup tasks are
     // cancellable by their own joined deadline even if their caller is protected.
     const Result = union(enum) { terminated: anyerror!void, timeout: std.Io.Cancelable!void };
@@ -40,7 +45,7 @@ pub fn run(io: std.Io, address: ?std.Io.net.IpAddress, key: ?Key, original: std.
     var select = std.Io.Select(Result).init(io, &storage);
     defer select.cancelDiscard();
     select.concurrent(.terminated, terminate, .{ io, address, key, original }) catch return;
-    select.concurrent(.timeout, deadline, .{io}) catch return;
+    select.concurrent(.timeout, deadline, .{ io, end }) catch return;
     switch (select.await() catch return) {
         .terminated => |result| result catch {},
         .timeout => |result| result catch {},
