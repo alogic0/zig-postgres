@@ -10,7 +10,7 @@ fn end(io: Io, ms: u32) Io.Timestamp {
     return Io.Timestamp.now(io, .awake).addDuration(.fromMilliseconds(ms));
 }
 fn opts(config: pg.PoolConfig) pg.ConnectOptions {
-    return .{ .host = config.host, .port = config.port, .user = config.user, .password = config.password, .database = config.database };
+    return .{ .host = config.host, .port = config.port, .user = config.user, .password = config.password, .database = config.database, .tls = config.tls };
 }
 fn execute(c: *pg.PgClient, sql: []const u8) !void {
     var r = try c.query(sql);

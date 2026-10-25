@@ -18,6 +18,7 @@ pub const PoolConfig = struct {
     limits: client_mod.Limits = .{},
     connect_timeout_ms: ?u32 = null,
     max_scram_iterations: u32 = 100000,
+    tls: @import("tls.zig").Options = .{ .mode = .disable },
 };
 
 pub const Pool = struct {
@@ -132,6 +133,7 @@ pub const Pool = struct {
             .database = self.config.database,
             .deadline = deadline.minimum(end, deadline.after(self.io, self.config.connect_timeout_ms)),
             .max_scram_iterations = self.config.max_scram_iterations,
+            .tls = self.config.tls,
         });
         client.limits = self.config.limits;
         return client;

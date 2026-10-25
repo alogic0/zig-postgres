@@ -51,3 +51,63 @@ pub fn runUntil(io: std.Io, address: ?std.Io.net.IpAddress, key: ?Key, original:
         .timeout => |result| result catch {},
     }
 }
+
+const Transport = @import("transport.zig").Transport;
+fn requestTls(io: std.Io, address: std.Io.net.IpAddress, key: Key, original: *Transport) !void {
+    const stream = try address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var rb: [64]u8 = undefined;
+    var wb: [64]u8 = undefined;
+    var reader = stream.reader(io, &rb);
+    var writer = stream.writer(io, &wb);
+    try writer.interface.writeAll("\x00\x00\x00\x08\x04\xd2\x16\x2f");
+    try writer.interface.flush();
+    if (try reader.interface.takeByte() != 'S') return error.TlsRefused;
+    var session = try @import("tls.zig").Session.init(&original.context.?, original.allocator, io, stream, original.identity.?);
+    defer session.deinit();
+    var packet: [16]u8 = undefined;
+    std.mem.writeInt(u32, packet[0..4], 16, .big);
+    std.mem.writeInt(u32, packet[4..8], 80877102, .big);
+    std.mem.writeInt(u32, packet[8..12], key.pid, .big);
+    std.mem.writeInt(u32, packet[12..16], key.secret, .big);
+    var rest: []const u8 = &packet;
+    while (rest.len != 0) {
+        const n = try session.write(rest);
+        if (n == 0) return error.TlsIoError;
+        rest = rest[n..];
+    }
+    var byte: [1]u8 = undefined;
+    _ = session.read(&byte) catch |err| switch (err) {
+        error.EndOfStream, error.TlsVerificationOrProtocolError => return,
+        else => return err,
+    };
+    return error.InvalidCancelResponse;
+}
+fn terminateTransport(io: std.Io, address: ?std.Io.net.IpAddress, key: ?Key, original: *Transport) !void {
+    const protection = io.swapCancelProtection(.unblocked);
+    defer _ = io.swapCancelProtection(protection);
+    if (comptime @import("postgres_options").tls) {
+        if (original.context != null) {
+            if (address) |addr| if (key) |k| try requestTls(io, addr, k, original);
+            try original.stream.shutdown(io, .send);
+            var bytes: [4096]u8 = undefined;
+            var slices = [_][]u8{&bytes};
+            while ((try original.stream.readWithControl(io, &slices, &.{})).data_len != 0) {}
+            return;
+        }
+    }
+    try terminate(io, address, key, original.stream);
+}
+pub fn runTransport(io: std.Io, address: ?std.Io.net.IpAddress, key: ?Key, original: *Transport, end: std.Io.Timestamp) void {
+    if (std.Io.Timestamp.now(io, .awake).nanoseconds >= end.nanoseconds) return;
+    const Result = union(enum) { terminated: anyerror!void, timeout: std.Io.Cancelable!void };
+    var storage: [2]Result = undefined;
+    var select = std.Io.Select(Result).init(io, &storage);
+    defer select.cancelDiscard();
+    select.concurrent(.terminated, terminateTransport, .{ io, address, key, original }) catch return;
+    select.concurrent(.timeout, deadline, .{ io, end }) catch return;
+    switch (select.await() catch return) {
+        .terminated => |result| result catch {},
+        .timeout => |result| result catch {},
+    }
+}

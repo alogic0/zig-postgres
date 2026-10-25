@@ -13,6 +13,9 @@ pub const Binary = parameters.Binary;
 pub const QueryOptions = client.QueryOptions;
 pub const ConnectOptions = client.ConnectOptions;
 pub const AcquireOptions = pool.AcquireOptions;
+pub const tls = @import("tls.zig");
+pub const TlsOptions = tls.Options;
+pub const tls_enabled = @import("postgres_options").tls;
 
 pub const PgClient = client.PgClient;
 pub const PgError = client.PgError;

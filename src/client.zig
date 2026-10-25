@@ -5,6 +5,8 @@ const Scram = @import("scram.zig");
 const protocol = @import("protocol.zig");
 const parameters = @import("parameters.zig");
 const deadline = @import("deadline.zig");
+const Transport = @import("transport.zig");
+const Tls = @import("tls.zig");
 pub const Limits = protocol.Limits;
 pub const QueryOptions = struct { deadline: ?std.Io.Timestamp = null };
 pub const ConnectOptions = struct {
@@ -15,6 +17,7 @@ pub const ConnectOptions = struct {
     database: []const u8 = "postgres",
     deadline: ?std.Io.Timestamp = null,
     max_scram_iterations: u32 = 100000,
+    tls: Tls.Options = .{},
 };
 
 pub const PgError = error{
@@ -77,8 +80,9 @@ pub const PgClient = struct {
     stream: std.Io.net.Stream,
     read_buf: []u8,
     write_buf: []u8,
-    net_reader: std.Io.net.Stream.Reader,
-    net_writer: std.Io.net.Stream.Writer,
+    transport: Transport.Transport,
+    net_reader: Transport.Reader,
+    net_writer: Transport.Writer,
     /// Owned error fields for the last query; cleared before each new exchange.
     last_diagnostic: ?diagnostic.Diagnostic = null,
     /// An incomplete exchange cannot safely be returned to a connection pool.
@@ -102,7 +106,7 @@ pub const PgClient = struct {
         password: []const u8,
         database: []const u8,
     ) !*PgClient {
-        return connectOpts(allocator, io, .{ .host = host, .port = port, .user = user, .password = password, .database = database });
+        return connectOpts(allocator, io, .{ .host = host, .port = port, .user = user, .password = password, .database = database, .tls = .{ .mode = .disable } });
     }
 
     const ConnectWork = struct {
@@ -115,6 +119,14 @@ pub const PgClient = struct {
         }
     };
     pub fn connectOpts(allocator: std.mem.Allocator, io: std.Io, options: ConnectOptions) !*PgClient {
+        if (options.tls.mode == .verify_full) {
+            if (comptime !@import("postgres_options").tls) return error.TlsUnavailable;
+            const name = options.tls.server_name orelse options.host;
+            if (name.len == 0 or std.mem.indexOfScalar(u8, name, 0) != null) return error.InvalidTlsIdentity;
+            if (std.Io.net.IpAddress.parse(name, 0)) |_| {} else |_| {
+                _ = std.Io.net.HostName.init(name) catch return error.InvalidTlsIdentity;
+            }
+        }
         if (options.max_scram_iterations == 0 or options.max_scram_iterations > 1000000) return error.InvalidScramLimit;
         var work: ConnectWork = .{ .allocator = allocator, .io = io, .options = options };
         errdefer if (work.result) |client| client.disconnect();
@@ -176,30 +188,44 @@ pub const PgClient = struct {
             .stream = stream,
             .read_buf = read_buf,
             .write_buf = write_buf,
-            .net_reader = stream.reader(io, read_buf),
-            .net_writer = stream.writer(io, write_buf),
+            .transport = .{ .io = io, .stream = stream, .allocator = allocator },
+            .net_reader = undefined,
+            .net_writer = undefined,
             .address = endpoint.address,
             .max_scram_iterations = options.max_scram_iterations,
         };
 
+        self.net_reader = Transport.Reader.init(&self.transport, read_buf);
+        self.net_writer = Transport.Writer.init(&self.transport, write_buf);
+        errdefer self.transport.deinit();
+        if (options.tls.mode == .verify_full) self.startTls(options) catch |err| return self.ioError(err);
         self.handshake(options.user, options.password, options.database) catch |err| return self.ioError(err);
         return self;
     }
 
+    fn startTls(self: *PgClient, options: ConnectOptions) !void {
+        const packet = [_]u8{ 0, 0, 0, 8, 4, 210, 22, 47 };
+        try self.net_writer.interface.writeAll(&packet);
+        try self.net_writer.interface.flush();
+        if (try self.net_reader.interface.takeByte() != 'S') return error.TlsRefused;
+        try self.transport.enableTls(options.tls, options.host);
+    }
+    fn terminateTask(self: *PgClient) !void {
+        try self.net_writer.interface.writeAll("X\x00\x00\x00\x04");
+        try self.net_writer.interface.flush();
+    }
     pub fn close(self: *PgClient) void {
-        if (!self.reusable) return self.disconnect();
-        // Send terminate ('X')
-        var term: [5]u8 = undefined;
-        term[0] = 'X';
-        std.mem.writeInt(u32, term[1..5], 4, .big);
-        _ = self.net_writer.interface.writeAll(&term) catch {};
-        _ = self.net_writer.interface.flush() catch {};
-
+        if (self.reusable) {
+            const protection = self.io.swapCancelProtection(.blocked);
+            defer _ = self.io.swapCancelProtection(protection);
+            deadline.run(self.io, std.Io.Timestamp.now(self.io, .awake).addDuration(.fromMilliseconds(500)), terminateTask, .{self}) catch {};
+        }
         self.disconnect();
     }
 
     /// Abort without writing into a failed or canceled protocol exchange.
     pub fn disconnect(self: *PgClient) void {
+        self.transport.deinit();
         self.stream.close(self.io);
         self.allocator.free(self.read_buf);
         self.allocator.free(self.write_buf);
@@ -467,7 +493,7 @@ pub const PgClient = struct {
         const cause = self.ioError(err);
         if (cause != error.DatabaseError) self.reusable = false;
         if (!self.reusable) self.transaction_status = .unknown;
-        if (cause == error.Canceled or cause == error.Timeout) @import("cancel.zig").runUntil(self.io, self.address, self.cancel_key, self.stream, self.cleanup_deadline orelse std.Io.Timestamp.now(self.io, .awake).addDuration(.fromMilliseconds(500)));
+        if (cause == error.Canceled or cause == error.Timeout) @import("cancel.zig").runTransport(self.io, self.address, self.cancel_key, &self.transport, self.cleanup_deadline orelse std.Io.Timestamp.now(self.io, .awake).addDuration(.fromMilliseconds(500)));
         return cause;
     }
 

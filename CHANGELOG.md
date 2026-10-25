@@ -7,7 +7,10 @@ SCRAM iteration admission (default100000, configurable up to1000000). Results of
 joined asynchronous work remain owned until cleanup completes. Cancellation keeps
 the selected remote address. Compatibility connection/acquisition APIs remain
 available. Backend note saves now include pool acquisition in their15second budget.
-TLS/streaming and feature-release gates remain pending.
+PG4B adds optional verified OpenSSL3 memory-BIO TLS, CA/DNS/IP validation,
+no plaintext fallback, encrypted cancellation and joined transport deadlines.
+TLS-disabled builds fail configured TLS before network use. Streaming and
+feature-release gates remain pending.
 
 ## 0.2.0 — October 24, 2026
 

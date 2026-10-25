@@ -39,10 +39,10 @@ remains ambiguous; successful commit waiting does not use the cleanup timeout.
 This is the existing bounded wire-v3 client, not a complete PostgreSQL driver.
 It supports text simple/parameterized queries and trust/cleartext/SCRAM-SHA-256 authentication.
 MD5 authentication is unsupported and returns `UnsupportedAuthType`.
-It has no TLS/channel binding or general retry policy. Unreleased PG4A adds
-hostname resolution and bounded connection/acquisition options, described below. Startup
-authentication payloads retain their 1024-byte bound; SASLprep and iteration CPU
-budgets remain unsupported. Simple-query frames now validate lengths, row
+Optional verified TLS is described below. Channel binding and automatic retries
+remain unsupported. PG4A adds hostname resolution and bounded connection/
+acquisition options. Startup authentication payloads retain their 1024-byte bound;
+SASLprep remains unsupported. SCRAM iterations are capped before PBKDF2. Simple-query frames now validate lengths, row
 descriptions, text cells, command/error terminators and ready status. Unsupported
 protocol states invalidate the connection. Raw server message bytes are not
 printed; diagnostics retain only owned SQLSTATE and the existing cached-query
@@ -177,3 +177,34 @@ bound prevents arbitrarily expensive configured work. Derivation is synchronous
 and finite; deadlines do not preempt individual crypto instructions. ASCII proof/
 nonce behavior is preserved; this does not add SASLprep or channel binding.
 Successful operation/commit deadlines remain separate from500ms cleanup.
+
+Optional verified TLS (PG4B) uses `-Dtls=true` when building this package or
+`.tls = true` in the dependency arguments. TLS builds link libc and dynamically load `libssl.so.3`;
+plaintext builds require neither OpenSSL nor libc for the driver. The supported
+fixture tuple is Linux, Zig0.17.0, OpenSSL3.0.13 and PostgreSQL16.13. Other platforms,
+OpenSSL versions and server versions have no acceptance claim here.
+
+`connectOpts` defaults to `.tls.mode = .verify_full`. TLS-disabled builds reject
+that configuration with `TlsUnavailable` before any network or authentication.
+Legacy positional `connect` and `PoolConfig` retain explicit plaintext defaults;
+set `.tls = .{ .ca_file = "/path/to/ca.pem" }` on the pool to require TLS.
+The default CA file is `/etc/ssl/certs/ca-certificates.crt`, bounded to4MiB.
+`server_name` optionally separates the verified DNS/IP identity from the network
+host. DNS identities also supply SNI; IP identities use IP certificate matching.
+Chain/identity verification and a TLS1.2 minimum are mandatory. TLS refusal,
+bad certificates and failed handshakes never fall back to plaintext.
+
+OpenSSL memory BIOs do CPU work while Zig owns all socket reads/writes and their
+joined absolute deadlines. Handshake, queries and encrypted CancelRequest obey
+the same operation/cleanup budgets as plaintext. CancelRequest uses a separate
+verified encrypted connection. Closing a client sends Terminate within500ms and
+then frees its socket/session without a blocking TLS shutdown. SSL/CTX/BIO
+resources have per-owner destruction; the loaded library remains process-owned.
+
+`zig build build-tls-certs` builds an opt-in local certificate adapter; it accepts
+only an absolute `zg-postgres-tls-*` directory and uses the installed OpenSSL CLI.
+The TLS-enabled live verifier additionally requires `POSTGRES_TEST_TLS_CERTS`
+pointing to that generated fixture. It exercises trusted DNS/IP identities,
+negative certificate/handshake cases, encrypted cancellation, rollback and a
+real committed write whose acknowledgement is lost. No production endpoint is
+required. Client certificates and SCRAM-SHA-256-PLUS remain separately scoped.
