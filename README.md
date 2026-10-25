@@ -1,6 +1,20 @@
 # zig-postgres
 
-Version 0.2.0, Zig 0.17.0 package exporting `postgres`. It builds with the Zig standard library.
+Version 0.3.0, Zig 0.17.0 package exporting `postgres`. It builds with the Zig standard library.
+
+The accepted capability set is PG0–PG5 with PG6 release gates. Tested with
+Zig0.17.0, PostgreSQL16.13 and Linux x86_64; TLS additionally uses OpenSSL3.0.13.
+
+| Capability | Delivered behavior |
+| --- | --- |
+| Transactions/pool | Validated ready state; busy/failed/open sessions discarded; joined500ms cleanup |
+| Queries | Bounded owned text/null results; single-statement bound parameters |
+| Deadlines | Absolute connect/auth/acquire/query/commit bounds; cleanup has its own budget |
+| Addresses | DNS, IPv4 and IPv6; selected remote endpoint retained for cancellation |
+| TLS | Optional verified CA/DNS/IP identity; encrypted cancellation; no fallback |
+| Streaming | Separate iterators, expiring views, explicit copies and safe abandoned-stream release |
+| Parameters | Null, bool, bigint-compatible integers, text, UUID and bytea hex |
+| Retry/session state | Caller owns retry decisions and session restoration; unknown commits stay unknown |
 
 From this directory:
 
@@ -8,6 +22,7 @@ From this directory:
 zig build
 zig build check test
 zig build check test -Doptimize=ReleaseSafe
+zig build ci --summary all
 ```
 
 The default builds `zig-out/bin/postgres-probe`, a public-API consumer. Building
@@ -265,3 +280,27 @@ One row arena bounds output heap. Configured import temporary-directory candidat
 select scratch storage; close/process exit removes the unlinked file. This preserves
 snapshot/coercion behavior and SQL release under HTTP backpressure. Throughput and
 scratch bytes are reported separately; no speedup is claimed.
+
+`zig build ci` is the offline CI entrypoint. It checks formatting and compiles
+public, live-verifier, measurement, wire-check and certificate-adapter consumers
+in Debug/ReleaseSafe with TLS enabled/disabled; it runs32offline tests. Live
+fixtures are compiled, never executed by CI. The same command works in a hosted
+runner with the pinned toolchain; this local checkout has no configured remote
+CI service, and the retained release receipt records local execution.
+
+A local release archive is reproducible from its exact commit:
+
+```sh
+git archive --format=tar --prefix=postgres-0.3.0/ HEAD | gzip -n > postgres-0.3.0.tar.gz
+zig fetch file:/absolute/path/postgres-0.3.0.tar.gz
+```
+
+Use the returned content hash in a dependency with that archive URL. Release
+evidence builds independent consumers with initially empty caches in all four
+profile/TLS combinations.
+
+Returning a consumer to0.2.0 requires reverting streaming/export admission,
+PG4A note-acquisition options and PG4B build/fixture options with the package pin.
+The new APIs are absent from0.2.0. Revert those consumer commits in reverse order;
+no database schema downgrade is needed. Borrower/row ownership, bounded cleanup
+and uncertain-commit policy must remain consistent during a rollback.

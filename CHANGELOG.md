@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — October 25, 2026
 
 PG4A adds DNS, absolute connection/authentication/pool-acquisition deadlines and
 SCRAM iteration admission (default100000, configurable up to1000000). Results of
@@ -14,7 +14,9 @@ streamQuery/streamParams iterators with expiring text/null views, explicit owned
 copies, connection exclusivity and nonblocking early invalidation. The selected
 backend CSV page uses bounded unlinked scratch and row arenas, releasing SQL
 before output backpressure; bound admission/page SQL
-preserves authorization and saved observations. Feature-release gates remain pending.
+preserves authorization and saved observations. Offline CI, initially empty-cache archive consumers and affected backend
+acceptance gates bind this local feature release. See the development receipt
+for exact commits, source/archive hashes, measured budgets and acceptance limits.
 
 ## 0.2.0 — October 24, 2026
 
