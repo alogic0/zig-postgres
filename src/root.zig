@@ -11,6 +11,8 @@ pub const parameters = @import("parameters.zig");
 pub const Uuid = parameters.Uuid;
 pub const Binary = parameters.Binary;
 pub const QueryOptions = client.QueryOptions;
+pub const ConnectOptions = client.ConnectOptions;
+pub const AcquireOptions = pool.AcquireOptions;
 
 pub const PgClient = client.PgClient;
 pub const PgError = client.PgError;

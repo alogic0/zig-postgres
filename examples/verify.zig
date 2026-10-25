@@ -264,8 +264,9 @@ pub fn main(init: std.process.Init) !void {
     const elapsed = try verify(checked.allocator(), init.io, config, expected);
     const protocol_result = try protocol_cases.run(checked.allocator(), init.io, config);
     const parameter_result = try @import("parameter_cases.zig").run(checked.allocator(), init.io, config);
+    const network_result = try @import("network_cases.zig").run(checked.allocator(), init.io, config);
     const report = try std.json.Stringify.valueAlloc(init.arena.allocator(), .{
-        .milestone = "PG3",
+        .milestone = "PG4A",
         .database = database,
         .compiler = @import("builtin").zig_version_string,
         .optimize = @tagName(@import("builtin").mode),
@@ -276,7 +277,8 @@ pub fn main(init: std.process.Init) !void {
         .client_leaks = @as(usize, 0),
         .protocol = protocol_result,
         .parameters = parameter_result,
+        .network = network_result,
     }, .{ .whitespace = .indent_2 });
     try Io.Dir.cwd().writeFile(init.io, .{ .sub_path = report_path, .data = report });
-    std.debug.print("PASS PG1/PG2/PG3: ownership, protocol and parameters, zero owned leaks\n", .{});
+    std.debug.print("PASS PG1/PG2/PG3/PG4A: ownership, protocol, parameters and network deadlines, zero owned leaks\n", .{});
 }

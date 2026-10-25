@@ -42,6 +42,15 @@ pub fn final(message: []const u8, expected: [32]u8) Invalid!void {
     try extensions(&parts, "ve");
     if (!std.crypto.timing_safe.eql([32]u8, signature, expected)) return error.AuthenticationFailed;
 }
+pub fn firstBounded(message: []const u8, nonce: []const u8, maximum: u32) !First {
+    const parsed = try first(message, nonce);
+    if (parsed.iterations > maximum) return error.ScramIterationLimit;
+    return parsed;
+}
+test "SCRAM iteration admission precedes key derivation" {
+    _ = try firstBounded("r=clientserver,s=c2FsdA==,i=4096", "client", 4096);
+    try std.testing.expectError(error.ScramIterationLimit, firstBounded("r=clientserver,s=c2FsdA==,i=4097", "client", 4096));
+}
 pub fn supportsSha256(mechanisms: []const u8) bool {
     var remaining = mechanisms;
     var found = false;

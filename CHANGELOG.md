@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+PG4A adds DNS, absolute connection/authentication/pool-acquisition deadlines and
+SCRAM iteration admission (default100000, configurable up to1000000). Results of
+joined asynchronous work remain owned until cleanup completes. Cancellation keeps
+the selected remote address. Compatibility connection/acquisition APIs remain
+available. Backend note saves now include pool acquisition in their15second budget.
+TLS/streaming and feature-release gates remain pending.
+
 ## 0.2.0 — October 24, 2026
 
 Feature release accepting PG0–PG3: transaction state and safe pool reuse, joined

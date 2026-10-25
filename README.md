@@ -39,8 +39,8 @@ remains ambiguous; successful commit waiting does not use the cleanup timeout.
 This is the existing bounded wire-v3 client, not a complete PostgreSQL driver.
 It supports text simple/parameterized queries and trust/cleartext/SCRAM-SHA-256 authentication.
 MD5 authentication is unsupported and returns `UnsupportedAuthType`.
-It has no TLS/channel binding, DNS resolution beyond the
-existing localhost/numeric-address support, or general retry policy. Startup
+It has no TLS/channel binding or general retry policy. Unreleased PG4A adds
+hostname resolution and bounded connection/acquisition options, described below. Startup
 authentication payloads retain their 1024-byte bound; SASLprep and iteration CPU
 budgets remain unsupported. Simple-query frames now validate lengths, row
 descriptions, text cells, command/error terminators and ready status. Unsupported
@@ -155,3 +155,25 @@ Accepted capability set for0.2.0 (PG0–PG3):
 Debug/ReleaseSafe driver and selected native note API/SQL checks use PostgreSQL16.13.
 This records one tested server version. The [changelog](CHANGELOG.md) identifies
 feature boundaries and the consumer rollback requirement. Pin the source archive with its package hash.
+
+Unreleased PG4A connection options add `PgClient.connectOpts(allocator, io, options)`
+and `Pool.acquireOpts(options)`. Supply an absolute awake-clock `deadline` for
+one budget across DNS resolution, TCP connect and authentication, or across pool
+mutex/wait/connect/authentication. Positional `connect` and plain `acquire` remain
+caller-cancelable compatibility wrappers without an imposed timeout. Pool config
+can set `connect_timeout_ms` for every newly opened slot; a caller acquisition
+deadline can only shorten it. Connection options/credentials remain borrowed
+until connect returns; PoolConfig strings outlive the pool.
+
+Hostnames use Zig0.17's resolver; numeric IPv4/IPv6 bypass DNS. Resolved addresses
+are attempted in resolver order within the same budget. The selected remote
+address is retained explicitly for CancelRequest, since Zig's socket address is
+local. No write is automatically retried. Startup failures join work and free
+sockets/allocations; an unsuccessful acquisition returns its reserved slot.
+
+`max_scram_iterations` defaults to100000, configurable from1through1000000.
+Server iterations above the selected cap fail before PBKDF2; the absolute upper
+bound prevents arbitrarily expensive configured work. Derivation is synchronous
+and finite; deadlines do not preempt individual crypto instructions. ASCII proof/
+nonce behavior is preserved; this does not add SASLprep or channel binding.
+Successful operation/commit deadlines remain separate from500ms cleanup.

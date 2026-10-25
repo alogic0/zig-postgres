@@ -4,8 +4,18 @@ const diagnostic = @import("diagnostic.zig");
 const Scram = @import("scram.zig");
 const protocol = @import("protocol.zig");
 const parameters = @import("parameters.zig");
+const deadline = @import("deadline.zig");
 pub const Limits = protocol.Limits;
 pub const QueryOptions = struct { deadline: ?std.Io.Timestamp = null };
+pub const ConnectOptions = struct {
+    host: []const u8 = "localhost",
+    port: u16 = 5432,
+    user: []const u8 = "postgres",
+    password: []const u8 = "",
+    database: []const u8 = "postgres",
+    deadline: ?std.Io.Timestamp = null,
+    max_scram_iterations: u32 = 100000,
+};
 
 pub const PgError = error{
     ConnectionFailed,
@@ -79,6 +89,7 @@ pub const PgClient = struct {
     operation_deadline: ?std.Io.Timestamp = null,
     address: ?std.Io.net.IpAddress = null,
     cancel_key: ?@import("cancel.zig").Key = null,
+    max_scram_iterations: u32 = 100000,
 
     const BUFFER_SIZE = 16384;
 
@@ -91,15 +102,64 @@ pub const PgClient = struct {
         password: []const u8,
         database: []const u8,
     ) !*PgClient {
-        const addr = if (std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "localhost"))
-            try std.Io.net.IpAddress.parse("127.0.0.1", port)
-        else
-            std.Io.net.IpAddress.parse(host, port) catch return PgError.ConnectionFailed;
+        return connectOpts(allocator, io, .{ .host = host, .port = port, .user = user, .password = password, .database = database });
+    }
 
-        const stream = addr.connect(io, .{ .mode = .stream }) catch |err| {
-            if (err == error.Canceled) return error.Canceled;
-            return PgError.ConnectionFailed;
+    const ConnectWork = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ConnectOptions,
+        result: ?*PgClient = null,
+        fn run(self: *ConnectWork) !void {
+            self.result = try connectInternal(self.allocator, self.io, self.options);
+        }
+    };
+    pub fn connectOpts(allocator: std.mem.Allocator, io: std.Io, options: ConnectOptions) !*PgClient {
+        if (options.max_scram_iterations == 0 or options.max_scram_iterations > 1000000) return error.InvalidScramLimit;
+        var work: ConnectWork = .{ .allocator = allocator, .io = io, .options = options };
+        errdefer if (work.result) |client| client.disconnect();
+        try deadline.run(io, options.deadline, ConnectWork.run, .{&work});
+        return work.result.?;
+    }
+
+    const Endpoint = struct { stream: std.Io.net.Stream, address: std.Io.net.IpAddress };
+    fn connectEndpoint(io: std.Io, host: []const u8, port: u16) !Endpoint {
+        if (std.Io.net.IpAddress.parse(host, port)) |address| {
+            return .{ .stream = address.connect(io, .{ .mode = .stream }) catch |err| switch (err) {
+                error.Canceled, error.Timeout => return err,
+                else => return error.ConnectionFailed,
+            }, .address = address };
+        } else |_| {}
+        const name = std.Io.net.HostName.init(host) catch return error.ConnectionFailed;
+        var storage: [32]std.Io.net.HostName.LookupResult = undefined;
+        var resolved: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&storage);
+        var lookup = io.async(std.Io.net.HostName.lookup, .{ name, io, &resolved, .{ .port = port } });
+        defer lookup.cancel(io) catch {};
+        // Resolver order, one shared deadline. Socket.address is the *local*
+        // endpoint in Zig0.17; retain the selected remote address explicitly.
+        while (resolved.getOne(io)) |result| switch (result) {
+            .canonical_name => {},
+            .address => |address| {
+                const stream = address.connect(io, .{ .mode = .stream }) catch |err| switch (err) {
+                    error.Canceled, error.Timeout => return err,
+                    else => continue,
+                };
+                return .{ .stream = stream, .address = address };
+            },
+        } else |err| switch (err) {
+            error.Canceled => return err,
+            error.Closed => {},
+        }
+        lookup.await(io) catch |err| switch (err) {
+            error.Canceled => return err,
+            else => return error.ConnectionFailed,
         };
+        return error.ConnectionFailed;
+    }
+
+    fn connectInternal(allocator: std.mem.Allocator, io: std.Io, options: ConnectOptions) !*PgClient {
+        const endpoint = try connectEndpoint(io, options.host, options.port);
+        const stream = endpoint.stream;
         errdefer stream.close(io);
 
         const read_buf = try allocator.alloc(u8, BUFFER_SIZE);
@@ -118,10 +178,11 @@ pub const PgClient = struct {
             .write_buf = write_buf,
             .net_reader = stream.reader(io, read_buf),
             .net_writer = stream.writer(io, write_buf),
-            .address = addr,
+            .address = endpoint.address,
+            .max_scram_iterations = options.max_scram_iterations,
         };
 
-        self.handshake(user, password, database) catch |err| return self.ioError(err);
+        self.handshake(options.user, options.password, options.database) catch |err| return self.ioError(err);
         return self;
     }
 
@@ -283,7 +344,7 @@ pub const PgClient = struct {
 
         var first_storage: [1024]u8 = undefined;
         const server_first_msg = try self.readScramMessage(&first_storage, 11);
-        const first = try Scram.first(server_first_msg, client_nonce);
+        const first = try Scram.firstBounded(server_first_msg, client_nonce, self.max_scram_iterations);
         const combined_nonce = first.nonce;
         var salt: [768]u8 = undefined;
         const salt_len = std.base64.standard.Decoder.calcSizeForSlice(first.salt) catch return PgError.AuthenticationFailed;

@@ -2,6 +2,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const client_mod = @import("client.zig");
+const deadline = @import("deadline.zig");
+pub const AcquireOptions = struct { deadline: ?std.Io.Timestamp = null };
 pub const PgClient = client_mod.PgClient;
 pub const PgRow = client_mod.PgRow;
 pub const PgResult = client_mod.PgResult;
@@ -14,6 +16,8 @@ pub const PoolConfig = struct {
     database: []const u8 = "postgres",
     size: u32 = 5,
     limits: client_mod.Limits = .{},
+    connect_timeout_ms: ?u32 = null,
+    max_scram_iterations: u32 = 100000,
 };
 
 pub const Pool = struct {
@@ -28,7 +32,7 @@ pub const Pool = struct {
     pub fn init(allocator: Allocator, io: std.Io, config: PoolConfig) !*Pool {
         const pool = try initLazy(allocator, io, config);
         errdefer pool.deinit();
-        for (pool.clients) |*slot| slot.* = try pool.connect();
+        for (pool.clients) |*slot| slot.* = try pool.connect(null);
         return pool;
     }
 
@@ -71,6 +75,25 @@ pub const Pool = struct {
     }
 
     pub fn acquire(self: *Pool) !*PgClient {
+        return self.acquireOpts(.{});
+    }
+
+    const AcquireWork = struct {
+        pool: *Pool,
+        options: AcquireOptions,
+        result: ?*PgClient = null,
+        fn run(work: *AcquireWork) !void {
+            work.result = try work.pool.acquireInternal(work.options);
+        }
+    };
+    pub fn acquireOpts(self: *Pool, options: AcquireOptions) !*PgClient {
+        var work: AcquireWork = .{ .pool = self, .options = options };
+        errdefer if (work.result) |client| self.release(client);
+        try deadline.run(self.io, options.deadline, AcquireWork.run, .{&work});
+        return work.result.?;
+    }
+
+    fn acquireInternal(self: *Pool, options: AcquireOptions) !*PgClient {
         try self.mutex.lock(self.io);
         while (true) {
             for (self.clients, 0..) |c, i| {
@@ -80,7 +103,7 @@ pub const Pool = struct {
                     if (c) |client| return client;
                     // Connect outside the mutex: one stalled slot must not
                     // prevent another borrower from using a ready connection.
-                    const client = self.connect() catch |err| {
+                    const client = self.connect(options.deadline) catch |err| {
                         self.mutex.lockUncancelable(self.io);
                         self.in_use[i] = false;
                         self.cond.signal(self.io);
@@ -100,8 +123,16 @@ pub const Pool = struct {
         }
     }
 
-    fn connect(self: *Pool) !*PgClient {
-        const client = try PgClient.connect(self.allocator, self.io, self.config.host, self.config.port, self.config.user, self.config.password, self.config.database);
+    fn connect(self: *Pool, end: ?std.Io.Timestamp) !*PgClient {
+        const client = try PgClient.connectOpts(self.allocator, self.io, .{
+            .host = self.config.host,
+            .port = self.config.port,
+            .user = self.config.user,
+            .password = self.config.password,
+            .database = self.config.database,
+            .deadline = deadline.minimum(end, deadline.after(self.io, self.config.connect_timeout_ms)),
+            .max_scram_iterations = self.config.max_scram_iterations,
+        });
         client.limits = self.config.limits;
         return client;
     }
