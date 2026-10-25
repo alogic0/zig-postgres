@@ -21,5 +21,15 @@ pub fn main(init: std.process.Init) !void {
     defer result.deinit();
     if (result.rows.len != 1 or try result.rows[0].getInt(0, i64) != 1) return error.UnexpectedResult;
     if (!std.mem.eql(u8, result.rows[0].get(1).?, "prospect's follow-up") or try result.rows[0].getBool(2) != true) return error.UnexpectedResult;
+    const rows = try client.streamParams("SELECT $1::bigint", .{@as(i64, 2)}, .{});
+    defer rows.deinit();
+    var count: usize = 0;
+    while (try rows.next()) |borrowed| {
+        var owned = try borrowed.copy(init.gpa);
+        defer owned.deinit();
+        if (try owned.getInt(0, i64) != 2) return error.UnexpectedResult;
+        count += 1;
+    }
+    if (count != 1) return error.UnexpectedResult;
     try transaction.commit();
 }

@@ -96,6 +96,7 @@ pub fn run(a: A, io: Io, config: pg.PoolConfig, env: anytype) !Outcome {
     const scope = c.withDeadline(end(io, 20000));
     defer scope.deinit();
     try require(c.transport.session != null);
+    try @import("stream_cases.zig").basic(c, a);
     try require(try integer(c, "SELECT 1") == 1);
     var params = try c.queryParams("SELECT $1::text", .{"encrypted prospect's follow-up 医療"});
     defer params.deinit();
@@ -158,6 +159,12 @@ pub fn run(a: A, io: Io, config: pg.PoolConfig, env: anytype) !Outcome {
     try task.cancel(io);
     pool.release(canceled);
     try require(relay.encrypted_cancels.load(.acquire) >= 2);
+    const streaming = try pool.acquire();
+    const rows = try streaming.streamQuery("SELECT pg_sleep(60)", .{ .deadline = end(io, 100) });
+    try std.testing.expectError(error.Timeout, rows.next());
+    rows.deinit();
+    pool.release(streaming);
+    try require(relay.encrypted_cancels.load(.acquire) >= 3);
     const rollback = try pool.acquire();
     var tx = try pg.Transaction.begin(rollback);
     try execute(rollback, "INSERT INTO pg4_tls_rows VALUES(2)");

@@ -31,6 +31,10 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&probe.step);
     check.dependOn(&tests.step);
 
+    _ = b.addModule("measurement_support", .{ .root_source_file = b.path("examples/heap_tracker.zig"), .target = target, .optimize = optimize });
+    const measure = b.addExecutable(.{ .name = "postgres-measure", .root_module = b.createModule(.{ .root_source_file = b.path("examples/measure.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "postgres", .module = postgres }} }) });
+    b.step("build-measure", "Compile the frozen opt-in export-page heap comparison").dependOn(&b.addInstallArtifact(measure, .{}).step);
+    check.dependOn(&measure.step);
     const certs = b.addExecutable(.{ .name = "postgres-tls-certs", .root_module = b.createModule(.{ .root_source_file = b.path("examples/tls_certs.zig"), .target = target, .optimize = optimize }) });
     b.step("build-tls-certs", "Compile the owned local TLS certificate adapter").dependOn(&b.addInstallArtifact(certs, .{}).step);
     const wire = b.addExecutable(.{ .name = "postgres-wire-check", .root_module = b.createModule(.{ .root_source_file = b.path("examples/wire_check.zig"), .target = target, .optimize = optimize }) });

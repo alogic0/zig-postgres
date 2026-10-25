@@ -94,6 +94,7 @@ pub const PgClient = struct {
     address: ?std.Io.net.IpAddress = null,
     cancel_key: ?@import("cancel.zig").Key = null,
     max_scram_iterations: u32 = 100000,
+    active_stream: ?*@import("stream.zig").Stream = null,
 
     const BUFFER_SIZE = 16384;
 
@@ -215,6 +216,7 @@ pub const PgClient = struct {
         try self.net_writer.interface.flush();
     }
     pub fn close(self: *PgClient) void {
+        if (self.active_stream != null) self.reusable = false;
         if (self.reusable) {
             const protection = self.io.swapCancelProtection(.blocked);
             defer _ = self.io.swapCancelProtection(protection);
@@ -225,6 +227,11 @@ pub const PgClient = struct {
 
     /// Abort without writing into a failed or canceled protocol exchange.
     pub fn disconnect(self: *PgClient) void {
+        if (self.active_stream) |active| {
+            active.generation +%= 1;
+            active.client = null;
+        }
+        self.active_stream = null;
         self.transport.deinit();
         self.stream.close(self.io);
         self.allocator.free(self.read_buf);
@@ -464,6 +471,7 @@ pub const PgClient = struct {
     }
 
     pub fn queryOpts(self: *PgClient, sql: []const u8, options: QueryOptions) !PgResult {
+        if (self.active_stream != null) return error.ConnectionBusy;
         const scope = self.withDeadline(options.deadline);
         defer scope.deinit();
         try self.checkDeadline();
@@ -477,6 +485,7 @@ pub const PgClient = struct {
     }
 
     pub fn queryParamsOpts(self: *PgClient, sql: []const u8, values: anytype, options: QueryOptions) !PgResult {
+        if (self.active_stream != null) return error.ConnectionBusy;
         const scope = self.withDeadline(options.deadline);
         defer scope.deinit();
         try self.checkDeadline();
@@ -487,6 +496,19 @@ pub const PgClient = struct {
         self.beginExchange();
         self.writeQuery(packet, false) catch |err| return self.exchangeError(err);
         return self.readResult(true) catch |err| return self.exchangeError(err);
+    }
+
+    /// The returned iterator owns the exchange until ReadyForQuery or close.
+    pub fn streamQuery(self: *PgClient, sql: []const u8, options: @import("stream.zig").Options) !*@import("stream.zig").Stream {
+        try StreamAccess.admit(self);
+        try self.limits.sql(sql);
+        return @import("stream.zig").Stream.start(self, sql, true, options);
+    }
+    pub fn streamParams(self: *PgClient, sql: []const u8, values: anytype, options: @import("stream.zig").Options) !*@import("stream.zig").Stream {
+        try StreamAccess.admit(self);
+        const packet = try parameters.request(self.allocator, self.limits, sql, values);
+        defer self.allocator.free(packet);
+        return @import("stream.zig").Stream.start(self, packet, false, options);
     }
 
     fn exchangeError(self: *PgClient, err: anyerror) anyerror {
@@ -501,6 +523,7 @@ pub const PgClient = struct {
     /// rollback task bypasses query's separate cancellation helper so expiry
     /// cannot start a second cleanup budget. The borrower releases/discards.
     pub fn rollbackCleanup(self: *PgClient) void {
+        if (self.active_stream) |active| active.close();
         if (!self.reusable) return;
         const protection = self.io.swapCancelProtection(.blocked);
         defer _ = self.io.swapCancelProtection(protection);
@@ -733,5 +756,29 @@ pub const PgClient = struct {
                 else => return error.ProtocolViolation,
             }
         }
+    }
+};
+
+/// Internal bridge keeps streaming on the same I/O/deadline/recovery owner.
+pub const StreamAccess = struct {
+    pub fn admit(c: *PgClient) !void {
+        if (c.active_stream != null) return error.ConnectionBusy;
+        if (!c.reusable) return error.ConnectionFailed;
+        try c.checkDeadline();
+    }
+    pub fn check(c: *PgClient) !void {
+        try c.checkDeadline();
+    }
+    pub fn begin(c: *PgClient) void {
+        c.beginExchange();
+    }
+    pub fn read(c: *PgClient, b: []u8) !void {
+        try c.readQueryBytes(b);
+    }
+    pub fn write(c: *PgClient, b: []const u8, simple: bool) !void {
+        try c.writeQuery(b, simple);
+    }
+    pub fn fail(c: *PgClient, err: anyerror) anyerror {
+        return c.exchangeError(err);
     }
 };

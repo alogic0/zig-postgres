@@ -208,3 +208,60 @@ pointing to that generated fixture. It exercises trusted DNS/IP identities,
 negative certificate/handshake cases, encrypted cancellation, rollback and a
 real committed write whose acknowledgement is lost. No production endpoint is
 required. Client certificates and SCRAM-SHA-256-PLUS remain separately scoped.
+
+`streamQuery(sql, options)` and `streamParams(sql, tuple, options)` return an owned
+`*PgStream`. Call `deinit` exactly once. These are separate from the unchanged
+materialized APIs. A client has one SQL owner: other queries/streams return
+`ConnectionBusy` until completion or invalidation. Clients are not safe for
+concurrent calls; cancel and join a reading task before releasing its borrower.
+
+```zig
+const rows = try client.streamParams("SELECT $1::text", .{"follow-up"}, .{});
+defer rows.deinit();
+while (try rows.next()) |row| {
+    const value = (try row.get(0)).?; // valid until next/close/client destruction
+    _ = value;
+    var saved = try row.copy(allocator);
+    defer saved.deinit(); // owned cells may outlive the iterator
+}
+```
+
+A borrowed row requires its iterator to remain alive. `get`/`copy` return
+`StaleRow` after advancing, closing or client destruction. Previously extracted
+slices cannot check their own lifetime. The iterator owns frame/view/tag buffers
+independently of the client: releasing an unfinished borrower discards that client,
+and the iterator may then safely be destroyed (or `next` returns `StreamClosed`).
+Its allocator must outlive it. Early `close` invalidates; neither close nor deinit
+reads/drains/writes the network. Release/discard/close the client to close its
+socket. Unfinished transaction cleanup also invalidates an active stream.
+
+Rows are provisional until `next` returns null after validated ReadyForQuery.
+Execute/CommandComplete is insufficient: a later Sync/deferred-constraint error
+returns failure with SQLSTATE, even after rows were yielded. Synchronized errors
+permit subsequent queries outside a transaction; failed transactions still need
+rollback. Operation deadlines are absolute across all next calls and final commit
+waiting; failures use the same joined500ms recovery budget. Closing or losing an unfinished write leaves its outcome unknown; discarding
+does not prove rollback. No request is replayed.
+
+StreamOptions.max_buffer_bytes defaults to32MiB for one frame payload, column
+views and the retained command tag. Normal message/cell/column/row/SQL/request
+limits still apply; max_result_bytes applies only to materialized results.
+The driver retains no accumulated row contents. The client I/O buffers, iterator
+object and input request are additional bounded allocations. Existing text/null
+values support the selected CSV consumer; binary codecs and column metadata
+remain outside this release's consumer requirements.
+
+`zig build build-measure` compiles an opt-in frozen500-row/144KiB JSON-page
+comparison. It requires the same owned database/report variables as the verifier.
+The old default64MiB materialized limit fails; a128MiB comparison completes and
+has the same ordered digest as streaming. Logical driver heap is 181114bytes (about177KiB);
+the backend's actual CSV projection measures about1.43MB, below its declared5MiB
+budget for that workload. Allocator metadata/shared I/O/HTTP/kernel/OpenSSL/server
+memory are excluded; this is not process RSS or a universal bound for arbitrary
+payloads/observations. The CSV owner stages a single streamed page in an immediately unlinked0600
+temporary file (128MiB maximum per page), gathers phone keys and loads saved
+observations, then releases its read transaction/slot before projecting CSV.
+One row arena bounds output heap. Configured import temporary-directory candidates
+select scratch storage; close/process exit removes the unlinked file. This preserves
+snapshot/coercion behavior and SQL release under HTTP backpressure. Throughput and
+scratch bytes are reported separately; no speedup is claimed.

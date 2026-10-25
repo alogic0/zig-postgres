@@ -9,8 +9,12 @@ the selected remote address. Compatibility connection/acquisition APIs remain
 available. Backend note saves now include pool acquisition in their15second budget.
 PG4B adds optional verified OpenSSL3 memory-BIO TLS, CA/DNS/IP validation,
 no plaintext fallback, encrypted cancellation and joined transport deadlines.
-TLS-disabled builds fail configured TLS before network use. Streaming and
-feature-release gates remain pending.
+TLS-disabled builds fail configured TLS before network use. PG5 adds separate
+streamQuery/streamParams iterators with expiring text/null views, explicit owned
+copies, connection exclusivity and nonblocking early invalidation. The selected
+backend CSV page uses bounded unlinked scratch and row arenas, releasing SQL
+before output backpressure; bound admission/page SQL
+preserves authorization and saved observations. Feature-release gates remain pending.
 
 ## 0.2.0 — October 24, 2026
 

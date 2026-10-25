@@ -74,6 +74,26 @@ const Peer = struct {
     }
 };
 
+// The same independently encoded malformed frames exercise both decoders.
+var stream_mode = false;
+var stream_buffer_limit: usize = 32 * 1024 * 1024;
+fn consume(c: *pg.PgClient) !void {
+    if (stream_mode) {
+        const rows = try c.streamQuery("SELECT 1", .{ .max_buffer_bytes = stream_buffer_limit });
+        defer rows.deinit();
+        while (try rows.next()) |result_row| try require(std.mem.eql(u8, (try result_row.get(0)) orelse "", "1"));
+    } else {
+        var result = try c.query("SELECT 1");
+        defer result.deinit();
+        for (result.rows) |result_row| try require(std.mem.eql(u8, result_row.get(0) orelse "", "1"));
+    }
+}
+pub fn runStreaming(a: A, io: Io, config: pg.PoolConfig) !Outcome {
+    stream_mode = true;
+    defer stream_mode = false;
+    return run(a, io, config);
+}
+
 fn wire(a: A, io: Io, bytes: []const u8, limits: pg.Limits, expected: ?anyerror, hold: bool, fail_at: ?usize) !bool {
     const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
     var peer: Peer = .{ .io = io, .listener = try address.listen(io, .{ .reuse_address = true }), .reply = bytes, .hold = hold };
@@ -87,12 +107,9 @@ fn wire(a: A, io: Io, bytes: []const u8, limits: pg.Limits, expected: ?anyerror,
     client.limits = limits;
     if (fail_at) |index| failing.fail_index = failing.alloc_index + index;
     const start = Io.Timestamp.now(io, .awake);
-    if (client.query("SELECT 1")) |value| {
-        var result = value;
-        defer result.deinit();
+    if (consume(client)) |_| {
         if (expected != null and fail_at == null) return error.ExpectedFailure;
         try require(client.reusable and client.transaction_status == .idle);
-        for (result.rows) |result_row| try require(std.mem.eql(u8, result_row.get(0) orelse "", "1"));
     } else |err| {
         if (fail_at != null) {
             try require(err == error.OutOfMemory and failing.has_induced_failure);
@@ -107,12 +124,14 @@ fn wire(a: A, io: Io, bytes: []const u8, limits: pg.Limits, expected: ?anyerror,
         } else if (err == error.DatabaseError) {
             try require(client.reusable and client.transaction_status == .idle);
             try require(std.mem.eql(u8, &(client.last_diagnostic orelse return error.MissingDiagnostic).sqlstate.?, "23505"));
+        } else if (stream_mode and err == error.OutOfMemory and client.reusable) {
+            try require(client.transaction_status == .idle);
         } else try require(!client.reusable and client.transaction_status == .unknown);
     }
     client.close();
     closed = true;
     try serving.await(io);
-    const preflight = if (expected) |err| err == error.SqlTooLarge else false;
+    const preflight = (if (expected) |err| err == error.SqlTooLarge else false) or (stream_mode and failing.has_induced_failure and peer.queries == 0);
     try require(peer.queries == (if (preflight) @as(usize, 0) else 1));
     if (hold) {
         const elapsed = start.untilNow(io, .awake).toMilliseconds();
@@ -184,8 +203,17 @@ pub fn run(a: A, io: Io, config: pg.PoolConfig) !Outcome {
     _ = try wire(a, io, good.bytes.items, .{ .max_rows = 1 }, null, false, null);
     _ = try wire(a, io, good.bytes.items, .{ .max_rows = 0 }, error.RowLimit, false, null);
     const logical_bytes = @sizeOf(pg.PgRow) + @sizeOf(?[]const u8) + 1 + "SELECT 1".len;
-    _ = try wire(a, io, good.bytes.items, .{ .max_result_bytes = logical_bytes }, null, false, null);
-    _ = try wire(a, io, good.bytes.items, .{ .max_result_bytes = logical_bytes - 1 }, error.ResultTooLarge, false, null);
+    if (stream_mode) {
+        stream_buffer_limit = description.len + @sizeOf(?[]const u8);
+        defer stream_buffer_limit = 32 * 1024 * 1024;
+        _ = try wire(a, io, good.bytes.items, .{ .max_result_bytes = 0 }, null, false, null);
+        stream_buffer_limit -= 1;
+        _ = try wire(a, io, good.bytes.items, .{}, error.StreamBufferTooSmall, false, null);
+        stream_buffer_limit = 32 * 1024 * 1024;
+    } else {
+        _ = try wire(a, io, good.bytes.items, .{ .max_result_bytes = logical_bytes }, null, false, null);
+        _ = try wire(a, io, good.bytes.items, .{ .max_result_bytes = logical_bytes - 1 }, error.ResultTooLarge, false, null);
+    }
 
     var empty: Reply = .{ .a = a };
     defer empty.deinit();

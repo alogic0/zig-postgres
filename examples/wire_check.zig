@@ -120,10 +120,12 @@ pub fn main(init: std.process.Init) !void {
     try require(root.object.get("active").?.integer == 0 and !root.object.get("failed").?.bool);
     try check(a, root, "PG3-R13", false);
     try check(a, root, "PG3-R14", true);
+    try check(a, root, "PG5-SYNC", true);
+    try check(a, root, "PG5-COMMIT", false);
     inline for (.{ Mutation.extra_sync, .drop_error, .bad_state, .drop_ready }) |mutation| {
         const corrupted = try std.json.parseFromSliceLeaky(V, a, raw, .{});
         try corrupt(a, corrupted, mutation);
         if (check(a, corrupted, "PG3-R14", true)) |_| return error.AcceptedCorruption else |err| try require(err == error.InvalidWireReceipt);
     }
-    std.debug.print("PASS wire: delayed commit and deferred Sync failure; one Sync/Ready each; four corruptions rejected\n", .{});
+    std.debug.print("PASS wire: materialized/streamed delayed commit and deferred Sync failure; one Sync/Ready each; four corruptions rejected\n", .{});
 }
