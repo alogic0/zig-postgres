@@ -2,6 +2,10 @@
 
 Version 0.3.0, Zig 0.17.0 package exporting `postgres`. It builds with the Zig standard library.
 
+The [improvement plan](docs/plans/2026-10-25.md) tracks pool availability, strict
+row decoding, standalone live acceptance, bounded health checks, common helpers
+and pool statistics.
+
 The accepted capability set is PG0–PG5 with PG6 release gates. Tested with
 Zig0.17.0, PostgreSQL16.13 and Linux x86_64; TLS additionally uses OpenSSL3.0.13.
 
