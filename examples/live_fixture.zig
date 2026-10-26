@@ -134,6 +134,13 @@ const State = struct {
     }
     fn execute(self: *State) !void {
         try self.registerRoot();
+        // Exercise the outer watchdog independently of image/startup speed.
+        // Active-driver cancellation and Docker cleanup have separate controls.
+        if (self.control == .outer_timeout) {
+            self.phase = "outer-timeout-control";
+            try self.io.sleep(.fromSeconds(60), .awake);
+            return error.FaultDidNotFail;
+        }
         self.phase = "image";
         if (self.control == .stalled_command) {
             _ = try self.checked(&.{ self.executable, "--hang-child" }, minimum(self.run_end, end(self.io, self.limits.command_ms)), self.limits.command_ms);
@@ -192,11 +199,6 @@ const State = struct {
             try Io.Dir.cwd().writeFile(self.io, .{ .sub_path = try self.a.print("{s}.started", .{self.report}), .data = self.name });
             var sleeping = try client.query("SELECT pg_sleep(60)");
             sleeping.deinit();
-            return error.FaultDidNotFail;
-        }
-        if (self.control == .outer_timeout) {
-            self.phase = "outer-timeout-control";
-            try self.io.sleep(.fromSeconds(60), .awake);
             return error.FaultDidNotFail;
         }
         const test_end = minimum(self.run_end, end(self.io, self.limits.test_ms));
