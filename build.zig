@@ -16,6 +16,8 @@ pub fn build(b: *std.Build) void {
     const tls_fixture = b.addModule("tls_fixture", .{ .root_source_file = b.path("examples/tls_fixture.zig"), .target = target, .optimize = optimize, .link_libc = tls_enabled, .imports = &.{.{ .name = "postgres", .module = postgres }} });
     const tests = b.addTest(.{ .root_module = postgres });
     b.step("test", "Run offline PostgreSQL declaration and SCRAM tests").dependOn(&b.addRunArtifact(tests).step);
+    const pool_cases = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("examples/pool_cases.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "postgres", .module = postgres }} }) });
+    b.step("test-pool", "Run public pool ownership/availability regressions on loopback").dependOn(&b.addRunArtifact(pool_cases).step);
 
     const probe = b.addExecutable(.{
         .name = "postgres-probe",
@@ -65,6 +67,10 @@ pub fn build(b: *std.Build) void {
             matrix.addOptions("postgres_options", matrix_options);
             const matrix_tests = b.addTest(.{ .name = "postgres-test-" ++ suffix, .root_module = matrix });
             ci.dependOn(&b.addRunArtifact(matrix_tests).step);
+            if (!with_tls) {
+                const matrix_pool = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("examples/pool_cases.zig"), .target = target, .optimize = mode, .imports = &.{.{ .name = "postgres", .module = matrix }} }) });
+                ci.dependOn(&b.addRunArtifact(matrix_pool).step);
+            }
             const matrix_probe = b.addExecutable(.{ .name = "postgres-probe-" ++ suffix, .root_module = b.createModule(.{ .root_source_file = b.path("examples/probe.zig"), .target = target, .optimize = mode, .imports = &.{.{ .name = "postgres", .module = matrix }} }) });
             ci.dependOn(&matrix_probe.step);
             const matrix_fixture = b.createModule(.{ .root_source_file = b.path("examples/tls_fixture.zig"), .target = target, .optimize = mode, .link_libc = with_tls, .imports = &.{.{ .name = "postgres", .module = matrix }} });

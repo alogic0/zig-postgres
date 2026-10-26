@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — October 2026 improvement plan
+
+Pool acquisition borrows an available authenticated connection before reserving
+an empty earlier slot. Connection establishment stays outside the mutex with the
+original absolute deadline and joined cancellation/slot-recovery ownership.
+Public loopback regressions cover ready/busy/empty/failed/canceled/concurrent
+slots without Docker; the supplied starvation reproducer fails on 0.3.0.
+
 ## 0.3.0 — October 25, 2026
 
 PG4A adds DNS, absolute connection/authentication/pool-acquisition deadlines and

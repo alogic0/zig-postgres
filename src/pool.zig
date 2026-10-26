@@ -97,11 +97,20 @@ pub const Pool = struct {
     fn acquireInternal(self: *Pool, options: AcquireOptions) !*PgClient {
         try self.mutex.lock(self.io);
         while (true) {
+            // A vacant earlier slot must not send a ready borrower through
+            // authentication. Reserve new capacity only after checking all
+            // already-connected, available slots under this same lock.
             for (self.clients, 0..) |c, i| {
-                if (!self.in_use[i]) {
+                if (!self.in_use[i]) if (c) |client| {
                     self.in_use[i] = true;
                     self.mutex.unlock(self.io);
-                    if (c) |client| return client;
+                    return client;
+                };
+            }
+            for (self.clients, 0..) |c, i| {
+                if (!self.in_use[i] and c == null) {
+                    self.in_use[i] = true;
+                    self.mutex.unlock(self.io);
                     // Connect outside the mutex: one stalled slot must not
                     // prevent another borrower from using a ready connection.
                     const client = self.connect(options.deadline) catch |err| {
