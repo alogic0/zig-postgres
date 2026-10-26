@@ -61,3 +61,11 @@ streamed rows with shared conversion, explicit bounds/null/bool/range errors and
 generation-first borrowed access. Legacy permissive getters are deprecated for
 0.4, retained unchanged in 0.3. Checked floats admit PostgreSQL nonfinite values;
 finite-only binding is a separate helper. Examples use typed checked getters.
+
+`test-live` now owns digest-pinned PostgreSQL 16, a dynamic loopback port, marked
+container/volume/database/certificates and separate phase/run/cleanup deadlines.
+It reuses generic cases without app schemas or sibling repositories, reports
+identities and driver heap separately from RSS, and retains the legacy consumer
+verifier. Seven control cases cover startup/command/case/outer failures, INT/TERM
+and failed cleanup with exact-marker recovery. Offline CI compiles every owner
+profile/TLS combination without running Docker; an opt-in CI job runs live gates.

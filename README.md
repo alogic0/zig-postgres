@@ -331,3 +331,44 @@ const id = try result.rows[0].getTyped(i64, 0);
 const flag = try result.rows[0].getTyped(?bool, 1);
 const text = try borrowed.getTyped([]const u8, 2); // until next()/close()
 ```
+
+## Standalone live acceptance
+
+`zig build ci -j4 --summary all` remains offline (loopback peers, no Docker or
+PostgreSQL). `zig build test-live -j4` is opt-in and requires Linux/amd64, Docker,
+Zig 0.17.0 and, for `-Dtls=true`, the OpenSSL 3 runtime and `openssl` CLI. Repeat
+with `-Doptimize=safe`, `-Dtls=true`, and both. No application repository, schema
+lease or existing application database is used. Zig fetches the verification
+helper pinned in `build.zig.zon`.
+
+The owner uses the plan's digest-pinned PostgreSQL 16 image and a dynamically
+published loopback port. A random exact label guards its named container/volume;
+its database has a separate marker. Cleanup is registered before startup and
+removes only these exact identities and its marked private certificate/work
+directory. Reports are retained outputs, not temporary fixture resources.
+
+Default limits are pull180s, command/certificate30s, startup60s, each case-group30s
+(a stronger bound for every case within it), tests300s, whole run600s and
+independent cleanup30s. Every command/poll uses its phase's remaining budget.
+Driver operation/cleanup deadlines remain separate. SIGINT/SIGTERM cancel and
+join work/subprocess groups before cleanup. Cleanup failure fails the run and
+reports exact owner/container/volume/directory IDs for recovery; it is never
+reported as successful cleanup. CI's explicit manual live job allows compilation
+plus run/cleanup and uses the same four settings.
+
+Set `POSTGRES_LIVE_REPORT` for a fresh report outside build outputs; otherwise it
+uses `zig-out/live-<mode>-<plain|tls>.json`. Finite positive `u32` millisecond
+overrides are `POSTGRES_LIVE_{PULL,COMMAND,STARTUP,CASE,TEST,RUN,CLEANUP}_MS` and are
+recorded in each report. `test-live-controls` verifies failed startup, a controlled
+stalled Docker-command boundary, hung case, outer timeout, failed cleanup with
+exact-marker recovery and cooperative INT/TERM. Test-only controls use private
+synthetic subprocesses; they never stop the host Docker daemon.
+
+Reports contain package/compiler/server/OpenSSL identity, image digest/ID/platform,
+settings/deadlines, generic protocol/parameter/transaction/network/stream/TLS and
+checked-row results, resource IDs and cleanup. Pure driver heap measurements
+(streaming500rows/73.7MB) are distinct from process peak RSS. The legacy
+verifier and measurement tool read `PGUSER` and `PGPASSWORD` and check the
+database comment before writing. The default comment is
+`zig-postgres disposable schema fixture <database>`. For an existing fixture,
+set `POSTGRES_TEST_MARKER` to the exact comment supplied by its creator.

@@ -87,7 +87,7 @@ pub const Relay = struct {
     dropped: Counter = .init(0),
     rollbacks_stalled: Counter = .init(0),
     pub fn init(a: A, io: Io, options: Options) !Relay {
-        if (!std.mem.startsWith(u8, options.database, "zg_parity_upgrade_") and !std.mem.startsWith(u8, options.database, "zg_parity_contact_access_")) return error.OwnedDatabaseRequired;
+        if (!std.mem.startsWith(u8, options.database, "zg_parity_upgrade_") and !std.mem.startsWith(u8, options.database, "zg_parity_contact_access_") and !standaloneDatabase(options.database)) return error.OwnedDatabaseRequired;
         var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
         errdefer listener.deinit(io);
         return .{ .allocator = a, .io = io, .options = options, .listener = listener, .server = try Server.init(a, io, options.ca, options.certificate, options.key) };
@@ -235,6 +235,13 @@ pub const Relay = struct {
         }
     }
 };
+
+fn standaloneDatabase(name: []const u8) bool {
+    const prefix = "zig_postgres_live_";
+    if (!std.mem.startsWith(u8, name, prefix) or name.len != prefix.len + 12) return false;
+    for (name[prefix.len..]) |byte| if (!std.ascii.isHex(byte) or std.ascii.isUpper(byte)) return false;
+    return true;
+}
 fn serverFrame(a: A, r: *Io.Reader) ![]u8 {
     const header = try r.takeArray(5);
     const size = std.mem.readInt(u32, header[1..5], .big);

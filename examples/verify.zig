@@ -139,7 +139,7 @@ fn fault(a: A, io: Io, config: pg.PoolConfig, mode: @FieldType(Peer, "mode"), ca
     return elapsed;
 }
 
-fn verify(a: A, io: Io, config: pg.PoolConfig, expected: []const u8) ![2]i64 {
+pub fn transactionCases(a: A, io: Io, config: pg.PoolConfig, expected: []const u8) ![2]i64 {
     const pool = try pg.Pool.init(a, io, config);
     defer pool.deinit();
     const observer = try pg.PgClient.connect(a, io, config.host, config.port, config.user, config.password, config.database);
@@ -149,7 +149,11 @@ fn verify(a: A, io: Io, config: pg.PoolConfig, expected: []const u8) ![2]i64 {
     defer marker.deinit();
     try require(marker.rows.len == 1 and std.mem.eql(u8, marker.rows[0].get(0) orelse "", expected));
     try execute(observer, "DROP TABLE IF EXISTS pg_development_rows; CREATE TABLE pg_development_rows(id integer PRIMARY KEY, body text)");
-    defer execute(observer, "DROP TABLE pg_development_rows") catch @panic("Fixture table cleanup failed");
+    var dropped = false;
+    defer if (!dropped) {
+        var cleanup = observer.queryOpts("DROP TABLE IF EXISTS pg_development_rows", .{ .deadline = Io.Timestamp.now(io, .awake).addDuration(.fromMilliseconds(500)) }) catch null;
+        if (cleanup) |*result| result.deinit();
+    };
 
     // PG1-01: successful query and reuse of the same server session.
     var c = try pool.acquire();
@@ -238,10 +242,13 @@ fn verify(a: A, io: Io, config: pg.PoolConfig, expected: []const u8) ![2]i64 {
 
     _ = try fault(a, io, config, .rollback_failure, false); // PG1-06
     _ = try fault(a, io, config, .commit_loss, false); // PG1-08
-    return .{
+    const elapsed: [2]i64 = .{
         try fault(a, io, config, .rollback_stall, false),
         try fault(a, io, config, .rollback_stall, true),
     }; // PG1-09, ordinary and already-canceled caller.
+    try execute(observer, "DROP TABLE pg_development_rows");
+    dropped = true;
+    return elapsed;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -259,9 +266,9 @@ pub fn main(init: std.process.Init) !void {
         .database = database,
         .size = 1,
     };
-    const expected = init.environ_map.get("POSTGRES_TEST_MARKER") orelse try std.fmt.allocPrint(init.arena.allocator(), "zig-postgres disposable schema fixture {s}", .{database});
+    const expected = init.environ_map.get("POSTGRES_TEST_MARKER") orelse try std.fmt.allocPrint(init.arena.allocator(), "zig-postgres disposable schema fixture {s}", .{config.database});
     if (expected.len == 0) return error.OwnedDatabaseRequired;
-    const elapsed = try verify(checked.allocator(), init.io, config, expected);
+    const elapsed = try transactionCases(checked.allocator(), init.io, config, expected);
     const protocol_result = try protocol_cases.run(checked.allocator(), init.io, config);
     const parameter_result = try @import("parameter_cases.zig").run(checked.allocator(), init.io, config);
     const network_result = try @import("network_cases.zig").run(checked.allocator(), init.io, config);

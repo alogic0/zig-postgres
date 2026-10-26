@@ -52,6 +52,22 @@ pub fn build(b: *std.Build) void {
     });
     live.root_module.addImport("tls_fixture", tls_fixture);
     b.step("build-live", "Compile the opt-in disposable PostgreSQL verifier").dependOn(&b.addInstallArtifact(live, .{}).step);
+    const standalone = b.addExecutable(.{ .name = "postgres-live", .root_module = b.createModule(.{ .root_source_file = b.path("examples/live_fixture.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "postgres", .module = postgres }, .{ .name = "tls_fixture", .module = tls_fixture }, .{ .name = "process", .module = b.dependency("process", .{ .target = target, .optimize = optimize }).module("process") } } }) });
+    b.step("build-standalone-live", "Compile the application-independent Docker fixture owner").dependOn(&b.addInstallArtifact(standalone, .{}).step);
+    const run_standalone = b.addRunArtifact(standalone);
+    run_standalone.addArtifactArg(certs);
+    run_standalone.setCwd(b.path("."));
+    run_standalone.has_side_effects = true;
+    const standalone_step = b.step("test-live", "Run the pinned standalone PostgreSQL acceptance with owned cleanup");
+    standalone_step.dependOn(&run_standalone.step);
+    standalone_step.dependOn(&b.addRunArtifact(pool_cases).step);
+    standalone_step.dependOn(&b.addRunArtifact(tests).step);
+    const run_controls = b.addRunArtifact(standalone);
+    run_controls.addArtifactArg(certs);
+    run_controls.addArg("--controls");
+    run_controls.setCwd(b.path("."));
+    run_controls.has_side_effects = true;
+    b.step("test-live-controls", "Verify startup, command/case timeout, interruption and cleanup failure").dependOn(&run_controls.step);
     // The CI entrypoint always checks both supported profiles and TLS settings.
     // These compile the opt-in network fixtures but never execute them.
     const ci = b.step("ci", "Offline format/public/live-consumer/test matrix: Debug/Safe, plaintext/TLS");
@@ -76,6 +92,8 @@ pub fn build(b: *std.Build) void {
             const matrix_fixture = b.createModule(.{ .root_source_file = b.path("examples/tls_fixture.zig"), .target = target, .optimize = mode, .link_libc = with_tls, .imports = &.{.{ .name = "postgres", .module = matrix }} });
             const matrix_live = b.addExecutable(.{ .name = "postgres-verify-" ++ suffix, .root_module = b.createModule(.{ .root_source_file = b.path("examples/verify.zig"), .target = target, .optimize = mode, .imports = &.{ .{ .name = "postgres", .module = matrix }, .{ .name = "tls_fixture", .module = matrix_fixture } } }) });
             ci.dependOn(&matrix_live.step);
+            const matrix_standalone = b.addExecutable(.{ .name = "postgres-standalone-" ++ suffix, .root_module = b.createModule(.{ .root_source_file = b.path("examples/live_fixture.zig"), .target = target, .optimize = mode, .link_libc = true, .imports = &.{ .{ .name = "postgres", .module = matrix }, .{ .name = "tls_fixture", .module = matrix_fixture }, .{ .name = "process", .module = b.dependency("process", .{ .target = target, .optimize = mode }).module("process") } } }) });
+            ci.dependOn(&matrix_standalone.step);
             const matrix_measure = b.addExecutable(.{ .name = "postgres-measure-" ++ suffix, .root_module = b.createModule(.{ .root_source_file = b.path("examples/measure.zig"), .target = target, .optimize = mode, .imports = &.{.{ .name = "postgres", .module = matrix }} }) });
             ci.dependOn(&matrix_measure.step);
         }

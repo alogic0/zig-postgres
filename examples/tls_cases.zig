@@ -86,7 +86,7 @@ pub fn run(a: A, io: Io, config: pg.PoolConfig, env: anytype) !Outcome {
     defer a.free(expired);
     const other = try std.fmt.allocPrint(a, "{s}/other-ca.crt", .{root});
     defer a.free(other);
-    var fixture: F.Options = .{ .database = config.database, .ca = ca, .certificate = leaf, .key = key };
+    var fixture: F.Options = .{ .database = config.database, .ca = ca, .certificate = leaf, .key = key, .upstream_port = config.port };
     var relay = try F.Relay.init(a, io, fixture);
     defer relay.stop();
     try relay.start();
