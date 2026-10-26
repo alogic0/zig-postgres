@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const client_mod = @import("client.zig");
 const deadline = @import("deadline.zig");
 pub const AcquireOptions = struct { deadline: ?std.Io.Timestamp = null };
+pub const HealthCheckOptions = struct { deadline: std.Io.Timestamp };
 pub const PgClient = client_mod.PgClient;
 pub const PgRow = client_mod.PgRow;
 pub const PgResult = client_mod.PgResult;
@@ -181,6 +182,19 @@ pub const Pool = struct {
         }
     }
 
+    /// One absolute budget across the queue, connect and SELECT. Failed query
+    /// recovery keeps the driver's separate cleanup allowance; release either
+    /// returns a synchronized client or discards it. No health write is retried.
+    pub fn healthCheckOpts(self: *Pool, options: HealthCheckOptions) !bool {
+        const client = try self.acquireOpts(.{ .deadline = options.deadline });
+        defer self.release(client);
+        var result = try client.queryOpts("SELECT 1", .{ .deadline = options.deadline });
+        defer result.deinit();
+        return result.rows.len > 0;
+    }
+
+    /// Compatibility wrapper: no operation timeout; errors become false.
+    /// Service health endpoints should use healthCheckOpts with their deadline.
     pub fn healthCheck(self: *Pool) bool {
         const client = self.acquire() catch return false;
         defer self.release(client);

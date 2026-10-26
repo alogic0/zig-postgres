@@ -14,6 +14,7 @@ pub const Binary = parameters.Binary;
 pub const QueryOptions = client.QueryOptions;
 pub const ConnectOptions = client.ConnectOptions;
 pub const AcquireOptions = pool.AcquireOptions;
+pub const HealthCheckOptions = pool.HealthCheckOptions;
 pub const streaming = @import("stream.zig");
 pub const PgStream = streaming.Stream;
 pub const StreamOptions = streaming.Options;

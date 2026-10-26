@@ -11,6 +11,8 @@ pub const Peer = struct {
     connections: std.atomic.Value(usize) = .init(0),
     auth_limit: std.atomic.Value(usize) = .init(std.math.maxInt(usize)),
     failed: std.atomic.Value(bool) = .init(false),
+    query_delay_ms: std.atomic.Value(u32) = .init(0),
+    query_seen: Io.Event = .unset,
     pub fn init(io: Io, limit: usize) !Peer {
         return .{ .io = io, .listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{}), .auth_limit = .init(limit) };
     }
@@ -34,7 +36,7 @@ pub const Peer = struct {
     fn session(self: *Peer, stream: Io.net.Stream, ordinal: usize) void {
         defer stream.close(self.io);
         self.exchange(stream, ordinal) catch |err| switch (err) {
-            error.EndOfStream, error.ReadFailed, error.WriteFailed => {},
+            error.EndOfStream, error.ReadFailed, error.WriteFailed, error.Canceled => {},
             else => self.failed.store(true, .release),
         };
     }
@@ -59,6 +61,9 @@ pub const Peer = struct {
             try r.interface.discardAll(length - 4);
             if (tag == 'X') return;
             if (tag != 'Q') return error.InvalidQuery;
+            self.query_seen.set(self.io);
+            const delay = self.query_delay_ms.load(.acquire);
+            if (delay != 0) try self.io.sleep(.fromMilliseconds(delay), .awake);
             try w.interface.writeAll("T\x00\x00\x00\x1a\x00\x01v\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x17\x00\x04\xff\xff\xff\xff\x00\x00D\x00\x00\x00\x0b\x00\x01\x00\x00\x00\x011C\x00\x00\x00\x0dSELECT 1\x00Z\x00\x00\x00\x05I");
             try w.interface.flush();
         }
@@ -155,4 +160,71 @@ test "empty busy failed canceled and concurrent slots recover their ownership" {
     try query(recovered);
     pool.release(recovered);
     try t.expect(!pool.in_use[0] and !pool.in_use[1] and !peer.failed.load(.acquire));
+}
+
+fn health(pool: *pg.Pool, started: *Io.Event) !void {
+    started.set(pool.io);
+    _ = try pool.healthCheckOpts(.{ .deadline = end(pool.io, 5000) });
+    return error.ExpectedCanceled;
+}
+fn releaseAfter(pool: *pg.Pool, client: *pg.PgClient, ms: u32) !void {
+    defer pool.release(client);
+    try pool.io.sleep(.fromMilliseconds(ms), .awake);
+}
+test "health covers exhausted pool and canceled waiters and recovers" {
+    const io = t.io;
+    var peer = try Peer.init(io, std.math.maxInt(usize));
+    defer peer.close();
+    var server = try io.concurrent(Peer.serve, .{&peer});
+    defer server.cancel(io) catch {};
+    const pool = try pg.Pool.init(t.allocator, io, peer.config(1));
+    defer pool.deinit();
+    const held = try pool.acquire();
+    try t.expectError(error.Timeout, pool.healthCheckOpts(.{ .deadline = end(io, 30) }));
+    var started: Io.Event = .unset;
+    var task = try io.concurrent(health, .{ pool, &started });
+    try started.wait(io);
+    try t.expectError(error.Canceled, task.cancel(io));
+    pool.release(held);
+    try t.expect(try pool.healthCheckOpts(.{ .deadline = end(io, 500) }));
+    try t.expect(!pool.in_use[0]);
+}
+test "health query cancellation and stalled response release or discard borrower" {
+    const io = t.io;
+    var peer = try Peer.init(io, std.math.maxInt(usize));
+    defer peer.close();
+    var server = try io.concurrent(Peer.serve, .{&peer});
+    defer server.cancel(io) catch {};
+    const pool = try pg.Pool.init(t.allocator, io, peer.config(1));
+    defer pool.deinit();
+    peer.query_delay_ms.store(2000, .release);
+    try t.expectError(error.Timeout, pool.healthCheckOpts(.{ .deadline = end(io, 30) }));
+    try t.expect(!pool.in_use[0]);
+    peer.query_seen = .unset;
+    var started: Io.Event = .unset;
+    var task = try io.concurrent(health, .{ pool, &started });
+    defer task.cancel(io) catch {};
+    try peer.query_seen.wait(io);
+    try t.expectError(error.Canceled, task.cancel(io));
+    try t.expect(!pool.in_use[0]);
+    peer.query_delay_ms.store(0, .release);
+    try t.expect(try pool.healthCheckOpts(.{ .deadline = end(io, 500) }));
+}
+test "health query receives remaining deadline rather than a renewed acquisition budget" {
+    const io = t.io;
+    var peer = try Peer.init(io, std.math.maxInt(usize));
+    defer peer.close();
+    var server = try io.concurrent(Peer.serve, .{&peer});
+    defer server.cancel(io) catch {};
+    const pool = try pg.Pool.init(t.allocator, io, peer.config(1));
+    defer pool.deinit();
+    const held = try pool.acquire();
+    var release = try io.concurrent(releaseAfter, .{ pool, held, @as(u32, 80) });
+    defer release.cancel(io) catch {};
+    peer.query_delay_ms.store(80, .release);
+    try t.expectError(error.Timeout, pool.healthCheckOpts(.{ .deadline = end(io, 120) }));
+    try release.await(io);
+    try t.expect(!pool.in_use[0]);
+    peer.query_delay_ms.store(0, .release);
+    try t.expect(try pool.healthCheckOpts(.{ .deadline = end(io, 500) }));
 }

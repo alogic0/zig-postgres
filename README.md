@@ -372,3 +372,14 @@ verifier and measurement tool read `PGUSER` and `PGPASSWORD` and check the
 database comment before writing. The default comment is
 `zig-postgres disposable schema fixture <database>`. For an existing fixture,
 set `POSTGRES_TEST_MARKER` to the exact comment supplied by its creator.
+
+## Bounded health
+
+`try pool.healthCheckOpts(.{ .deadline = absolute_awake_timestamp })` gives one
+budget to acquisition/connect/SELECT1 and releases or discards the borrower on
+every exit. Query recovery retains its separate joined cleanup allowance, so
+return can follow the operation deadline by that bounded cleanup interval.
+Timeout/cancellation are errors for the caller to map to its health response.
+`healthCheck()` remains an unbounded compatibility wrapper returning false on
+errors; use the bounded API for service endpoints. Waiting for acquisition never
+renews the SELECT budget.

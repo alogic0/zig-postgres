@@ -69,3 +69,8 @@ identities and driver heap separately from RSS, and retains the legacy consumer
 verifier. Seven control cases cover startup/command/case/outer failures, INT/TERM
 and failed cleanup with exact-marker recovery. Offline CI compiles every owner
 profile/TLS combination without running Docker; an opt-in CI job runs live gates.
+
+`Pool.healthCheckOpts` accepts one required absolute deadline across acquisition
+and SELECT1, preserving separate bounded recovery. Exhaustion, stalled queries,
+canceled waits/queries and no-budget-renewal regressions pass in Debug/Safe.
+The existing unbounded boolean wrapper retains compatibility.
