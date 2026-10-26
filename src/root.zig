@@ -11,6 +11,10 @@ pub const Limits = protocol.Limits;
 pub const parameters = @import("parameters.zig");
 pub const Uuid = parameters.Uuid;
 pub const Binary = parameters.Binary;
+pub const FiniteFloat = parameters.FiniteFloat;
+pub const finiteFloat = parameters.finiteFloat;
+pub const ParsedUri = @import("uri.zig").ParsedUri;
+pub const commandCount = @import("command.zig").count;
 pub const QueryOptions = client.QueryOptions;
 pub const ConnectOptions = client.ConnectOptions;
 pub const AcquireOptions = pool.AcquireOptions;
@@ -34,4 +38,6 @@ pub const Transaction = transaction.Transaction;
 test {
     @import("std").testing.refAllDecls(@This());
     _ = @import("decode_test.zig");
+    _ = @import("uri.zig");
+    _ = @import("command.zig");
 }

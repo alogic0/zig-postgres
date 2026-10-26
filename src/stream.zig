@@ -61,6 +61,29 @@ pub const Stream = struct {
     command_complete: bool = false,
     has_error: bool = false,
     complete: bool = false,
+    ready: bool = false,
+    /// Counts are provisional until ReadyForQuery validates the whole exchange.
+    pub fn commandCount(self: *Stream) !?u64 {
+        if (!self.ready) return error.IncompleteResult;
+        if (self.has_error) return error.DatabaseError;
+        return @import("command.zig").count(self.command_tag);
+    }
+    /// Drain through ReadyForQuery. A later/deferred database error takes
+    /// precedence over cardinality; any error closes the exchange. The caller
+    /// still owns the iterator and connection borrow, and owns a returned row.
+    pub fn singleRow(self: *Stream, allocator: A) !?C.PgRow {
+        var first: ?C.PgRow = null;
+        errdefer {
+            if (first) |*row| row.deinit();
+            self.close();
+        }
+        var many = false;
+        while (try self.next()) |row| {
+            if (first == null) first = try row.copy(allocator) else many = true;
+        }
+        if (many) return error.TooManyRows;
+        return first;
+    }
     pub fn start(c: *C.PgClient, bytes: []const u8, simple: bool, options: Options) !*Stream {
         try C.StreamAccess.admit(c);
         if (options.max_buffer_bytes == 0) return error.StreamBufferTooSmall;
@@ -215,6 +238,7 @@ pub const Stream = struct {
                         'E' => .failed_transaction,
                         else => return error.ProtocolViolation,
                     };
+                    self.ready = true;
                     self.complete = !self.has_error;
                     self.detach();
                     if (self.has_error) return error.DatabaseError;

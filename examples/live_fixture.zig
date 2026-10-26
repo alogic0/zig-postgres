@@ -217,6 +217,7 @@ const State = struct {
         try self.group("network", @import("network_cases.zig").run, .{ a, self.io, config }, test_end);
         try self.group("streaming", @import("stream_cases.zig").run, .{ a, self.io, config }, test_end);
         try self.group("checked-rows", @import("live_cases.zig").rows, .{ a, self.io, config }, test_end);
+        try self.group("common-helpers", @import("common_cases.zig").run, .{ a, self.io, config }, test_end);
         var env = try self.env.clone(self.a);
         defer env.deinit();
         try env.put("POSTGRES_TEST_TLS_CERTS", self.certs);

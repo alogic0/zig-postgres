@@ -79,6 +79,28 @@ pub const PgResult = struct {
     rows: []PgRow,
     command_tag: []const u8,
 
+    pub fn commandCount(self: PgResult) !?u64 {
+        return @import("command.zig").count(self.command_tag);
+    }
+
+    /// Consume the complete result on every exit; transfer a sole owned row.
+    /// This result becomes empty and remains safe to deinit. The caller owns
+    /// the returned row independently of the client/borrower.
+    pub fn takeOne(self: *PgResult) !?PgRow {
+        if (self.rows.len > 1) {
+            self.deinit();
+            self.rows = &.{};
+            self.command_tag = "";
+            return error.TooManyRows;
+        }
+        const row: ?PgRow = if (self.rows.len == 1) self.rows[0] else null;
+        self.allocator.free(self.rows);
+        self.allocator.free(self.command_tag);
+        self.rows = &.{};
+        self.command_tag = "";
+        return row;
+    }
+
     pub fn deinit(self: *PgResult) void {
         for (self.rows) |*row| {
             row.deinit();
@@ -111,6 +133,23 @@ pub const PgClient = struct {
     active_stream: ?*@import("stream.zig").Stream = null,
 
     const BUFFER_SIZE = 16384;
+
+    pub fn queryRow(self: *PgClient, sql: []const u8) !?PgRow {
+        return self.queryRowOpts(sql, .{});
+    }
+    pub fn queryRowOpts(self: *PgClient, sql: []const u8, options: QueryOptions) !?PgRow {
+        var result = try self.queryOpts(sql, options);
+        defer result.deinit();
+        return result.takeOne();
+    }
+    pub fn queryRowParams(self: *PgClient, sql: []const u8, values: anytype) !?PgRow {
+        return self.queryRowParamsOpts(sql, values, .{});
+    }
+    pub fn queryRowParamsOpts(self: *PgClient, sql: []const u8, values: anytype, options: QueryOptions) !?PgRow {
+        var result = try self.queryParamsOpts(sql, values, options);
+        defer result.deinit();
+        return result.takeOne();
+    }
 
     pub fn connect(
         allocator: std.mem.Allocator,

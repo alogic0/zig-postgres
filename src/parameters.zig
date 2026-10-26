@@ -3,7 +3,12 @@ const std = @import("std");
 const Limits = @import("protocol.zig").Limits;
 pub const Uuid = struct { bytes: [16]u8 };
 pub const Binary = struct { bytes: []const u8 };
-pub const Error = error{ UnsupportedParameter, IntegerRange, InvalidText, ParameterLimit, RequestTooLarge };
+pub const FiniteFloat = struct { value: f64 };
+pub fn finiteFloat(number: f64) error{InvalidFloatParameter}!FiniteFloat {
+    if (!std.math.isFinite(number)) return error.InvalidFloatParameter;
+    return .{ .value = number };
+}
+pub const Error = error{ UnsupportedParameter, IntegerRange, InvalidText, ParameterLimit, RequestTooLarge, InvalidFloatParameter };
 
 const Sink = struct {
     bytes: ?[]u8 = null,
@@ -30,6 +35,12 @@ const Sink = struct {
 
 fn value(s: *Sink, v: anytype) Error!void {
     const T = @TypeOf(v);
+    if (T == FiniteFloat) {
+        if (!std.math.isFinite(v.value)) return error.InvalidFloatParameter;
+        var buffer: [64]u8 = undefined;
+        const encoded = std.fmt.bufPrint(&buffer, "{e}", .{v.value}) catch return error.RequestTooLarge;
+        return s.text(encoded);
+    }
     if (T == Uuid) {
         var text: [36]u8 = undefined;
         const hex = "0123456789abcdef";
@@ -128,4 +139,12 @@ test "admission counts complete wire bytes and rejects unsupported or oversized 
     try std.testing.expectError(error.InvalidText, request(a, .{}, "SELECT $1", .{"zero\x00byte"}));
     var sink: Sink = .{ .offset = std.math.maxInt(usize), .limit = std.math.maxInt(usize) };
     try std.testing.expectError(error.RequestTooLarge, sink.put("x"));
+}
+
+test "finite float wrapper rejects nonfinite even when constructor is bypassed" {
+    const a = std.testing.allocator;
+    const packet = try request(a, .{}, "SELECT $1", .{try finiteFloat(0.1)});
+    defer a.free(packet);
+    try std.testing.expectError(error.InvalidFloatParameter, finiteFloat(std.math.nan(f64)));
+    try std.testing.expectError(error.InvalidFloatParameter, request(a, .{}, "SELECT $1", .{FiniteFloat{ .value = std.math.inf(f64) }}));
 }

@@ -383,3 +383,37 @@ Timeout/cancellation are errors for the caller to map to its health response.
 `healthCheck()` remains an unbounded compatibility wrapper returning false on
 errors; use the bounded API for service endpoints. Waiting for acquisition never
 renews the SELECT budget.
+
+## Common helpers
+
+`ParsedUri.parse(allocator, text)` (or `fromUri(allocator, std.Uri)`) owns every
+configuration string until `deinit`; input can be freed immediately. It accepts
+postgres/postgresql, percent encoding, IPv4/IPv6, default port5432 and supported
+TLS options (`sslmode=disable|verify-full`, `sslrootcert`, `sslservername`).
+Malformed escapes, NUL, duplicate/unknown options and unsupported security modes
+fail before network use. Application pool size, deadlines and retry policy remain
+caller choices; keep the parsed owner alive until the pool is destroyed.
+
+Bind `try finiteFloat(number)` for finite f64 values, including negative zero,
+using round-trip-safe text. NaN/infinity and bypassed invalid wrappers fail during
+request admission before any exchange. Exact decimals should remain decimal text
+with explicit SQL casts, not be converted through f64. Raw floats remain unsupported.
+
+`PgResult.commandCount()` and `commandCount(tag)` return `!?u64` for exactly
+INSERT0N, UPDATE, DELETE, MERGE, SELECT, MOVE, FETCH and COPY count tags. They read
+only the final CommandComplete tag, never sum counts or infer from result rows.
+Zero is a count; empty/other commands return null; malformed recognized tags or
+overflow fail. SELECT/FETCH counts describe returned rows, not modified rows;
+COPY tag recognition does not implement the COPY streaming protocol.
+`PgStream.commandCount()` requires validated ReadyForQuery (`IncompleteResult`
+before completion, `DatabaseError` after server failure). Provisional tags cannot
+turn a later statement or deferred commit failure into success.
+
+`queryRow[Opts]` / `queryRowParams[Opts]` return an optional owned PgRow: zero rows
+is null, one row transfers ownership to the caller (`row.deinit()`), multiple rows
+is `TooManyRows`. They finish protocol/error processing before returning.
+`PgResult.takeOne()` consumes the result on every exit, leaving it safe to deinit.
+`stream.singleRow(allocator)` copies the first row, drains through ReadyForQuery,
+and applies the same cardinality rule; late database errors take precedence.
+The caller still owns and must deinit the iterator and release its connection.
+Allocation failure invalidates the stream so release discards the connection.

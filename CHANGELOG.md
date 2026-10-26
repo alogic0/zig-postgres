@@ -8,6 +8,14 @@ original absolute deadline and joined cancellation/slot-recovery ownership.
 Public loopback regressions cover ready/busy/empty/failed/canceled/concurrent
 slots without Docker; the supplied starvation reproducer fails on 0.3.0.
 
+Checked typed/bounds getters share strict owned/borrowed scalar decoding;
+legacy permissive getters remain deprecated until the breaking0.4 release.
+An opt-in owned Docker PostgreSQL16 live runner covers Debug/Safe and TLS,
+with absolute budgets, independent cleanup and JSON evidence. Offline CI stays
+Docker-free. Bounded health checks share one acquisition/query deadline.
+Owned URI configuration, finite float binding, exact final command counts and
+optional-single-row helpers preserve completion errors and explicit ownership.
+
 ## 0.3.0 — October 25, 2026
 
 PG4A adds DNS, absolute connection/authentication/pool-acquisition deadlines and
