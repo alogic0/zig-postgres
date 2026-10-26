@@ -55,3 +55,9 @@ application authorization/audit boundaries during any consumer rollback.
 
 Independent local extraction of the backend's PostgreSQL wire-v3 runtime,
 compatibility adapters and standalone offline public consumer.
+
+The improvement candidate adds `getChecked`/`getTyped(T,index)` on owned and
+streamed rows with shared conversion, explicit bounds/null/bool/range errors and
+generation-first borrowed access. Legacy permissive getters are deprecated for
+0.4, retained unchanged in 0.3. Checked floats admit PostgreSQL nonfinite values;
+finite-only binding is a separate helper. Examples use typed checked getters.

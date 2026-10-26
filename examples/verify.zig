@@ -17,7 +17,7 @@ fn integer(c: *pg.PgClient, sql: []const u8) !i64 {
     var result = try c.query(sql);
     defer result.deinit();
     try require(result.rows.len == 1);
-    return (try result.rows[0].getInt(0, i64)) orelse error.NullResult;
+    return (try result.rows[0].getTyped(?i64, 0)) orelse error.NullResult;
 }
 fn databaseError(c: *pg.PgClient) !void {
     if (c.query("SELECT 1/0")) |value| {

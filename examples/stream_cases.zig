@@ -34,6 +34,8 @@ pub fn basic(c: *pg.PgClient, a: A) !void {
     defer owned.deinit();
     const second = (try s.next()).?;
     try std.testing.expectError(error.StaleRow, first.get(0));
+    try std.testing.expectError(error.StaleRow, first.getTyped([]const u8, 0));
+    try std.testing.expectError(error.StaleRow, first.getChecked(99));
     try require(std.mem.eql(u8, (try second.get(0)).?, "2"));
     _ = (try s.next()).?;
     try require(try s.next() == null and s.complete and s.rows == 3);
@@ -97,7 +99,7 @@ pub fn run(a: A, io: Io, config: pg.PoolConfig) !Outcome {
         const provisional = try failed(c, "/* PG5-SYNC */ INSERT INTO pg5_deferred VALUES($1::int),($1::int) RETURNING id", .{1}, "23505");
         try require(provisional == 2 and c.transaction_status == .idle);
         var count = try c.query("SELECT count(*) FROM pg5_deferred");
-        try require(try count.rows[0].getInt(0, i64) == 0);
+        try require(try count.rows[0].getTyped(?i64, 0) == 0);
         count.deinit();
         try exec(c, "CREATE FUNCTION pg_temp.pg5_commit_delay() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.75); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER pg5_delay AFTER INSERT ON pg5_deferred DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION pg_temp.pg5_commit_delay()");
         const before_commit = Io.Timestamp.now(io, .awake);
@@ -107,7 +109,7 @@ pub fn run(a: A, io: Io, config: pg.PoolConfig) !Outcome {
         delayed_commit_ms = before_commit.untilNow(io, .awake).toMilliseconds();
         try require(delayed_commit_ms >= 650 and delayed_commit_ms <= 2500 and c.transaction_status == .idle);
         var committed = try c.query("SELECT count(*) FROM pg5_deferred WHERE id=7");
-        try require(try committed.rows[0].getInt(0, i64) == 1);
+        try require(try committed.rows[0].getTyped(?i64, 0) == 1);
         committed.deinit();
         try exec(c, "DROP TABLE pg5_deferred; DROP FUNCTION pg_temp.pg5_commit_delay()");
     }

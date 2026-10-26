@@ -17,7 +17,7 @@ fn execute(c: *pg.PgClient, sql: []const u8) !void {
 fn integer(c: *pg.PgClient, sql: []const u8) !i64 {
     var r = try c.query(sql);
     defer r.deinit();
-    return (try r.rows[0].getInt(0, i64)).?;
+    return (try r.rows[0].getTyped(?i64, 0)).?;
 }
 var attempted = std.atomic.Value(usize).init(0);
 fn forbiddenConnect(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.ConnectOptions) Io.net.IpAddress.ConnectError!Io.net.Socket {

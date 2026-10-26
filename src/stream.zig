@@ -16,9 +16,19 @@ pub const BorrowedRow = struct {
         if (row.generation != row.owner.generation) return error.StaleRow;
     }
     /// Call only while the iterator is alive. Advancing/closing expires this row.
+    /// Deprecated permissive bounds; use getChecked/getTyped (0.4 migration).
     pub fn get(row: BorrowedRow, index: usize) !?[]const u8 {
         try row.check();
         return if (index < row.owner.values.len) row.owner.values[index] else null;
+    }
+    pub fn getChecked(row: BorrowedRow, index: usize) !?[]const u8 {
+        try row.check();
+        if (index >= row.owner.values.len) return error.ColumnOutOfBounds;
+        return row.owner.values[index];
+    }
+    /// Valid only until advancement/close, including when returning text.
+    pub fn getTyped(row: BorrowedRow, comptime T: type, index: usize) !T {
+        return @import("decode.zig").value(T, try row.getChecked(index));
     }
     pub fn copy(row: BorrowedRow, allocator: A) !C.PgRow {
         try row.check();

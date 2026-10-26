@@ -308,3 +308,26 @@ PG4A note-acquisition options and PG4B build/fixture options with the package pi
 The new APIs are absent from0.2.0. Revert those consumer commits in reverse order;
 no database schema downgrade is needed. Borrower/row ownership, bounded cleanup
 and uncertain-commit policy must remain consistent during a rollback.
+
+## Checked rows (additive 0.3 API)
+
+Use `row.getChecked(index)` for bounded nullable text, or
+`row.getTyped(T, index)` for `[]const u8`, `bool`, integer or floating types.
+Use `?T` for SQL NULL; required NULL raises `UnexpectedNull`. Empty text stays
+empty; it is invalid as a boolean or number. Booleans accept exactly `t`/`f`.
+Integer overflow, invalid values and column bounds are errors. Floating getters
+accept PostgreSQL's `NaN`, `Infinity`, `-Infinity`; a finite decimal overflowing
+the destination type is an error. This differs from finite-only binding.
+
+Both PgRow and BorrowedRow share conversion. Borrowed getters check generation
+before even checking bounds; strings expire on advancement/close and must be
+copied to outlive the stream. The iterator itself must still be alive when a row
+is accessed. `get`, `getInt`, `getBool` retain their permissive 0.3 behavior for
+compatibility and are deprecated. Removal/signature changes are scheduled for
+the explicitly breaking 0.4 release, not this additive candidate.
+
+```zig
+const id = try result.rows[0].getTyped(i64, 0);
+const flag = try result.rows[0].getTyped(?bool, 1);
+const text = try borrowed.getTyped([]const u8, 2); // until next()/close()
+```

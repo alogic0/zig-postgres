@@ -3,6 +3,7 @@ pub const client = @import("client.zig");
 pub const pool = @import("pool.zig");
 pub const scram = @import("scram.zig");
 pub const diagnostic = @import("diagnostic.zig");
+pub const decoding = @import("decode.zig");
 pub const cancel = @import("cancel.zig");
 pub const transaction = @import("transaction.zig");
 pub const protocol = @import("protocol.zig");
@@ -31,4 +32,5 @@ pub const Transaction = transaction.Transaction;
 
 test {
     @import("std").testing.refAllDecls(@This());
+    _ = @import("decode_test.zig");
 }

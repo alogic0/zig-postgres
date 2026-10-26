@@ -43,16 +43,30 @@ pub const PgRow = struct {
         self.allocator.free(self.values);
     }
 
+    /// Deprecated permissive bounds behavior; use getChecked/getTyped. 0.4
+    /// changes this signature; 0.3 retains compatibility with existing callers.
     pub fn get(self: PgRow, index: usize) ?[]const u8 {
         if (index >= self.values.len) return null;
         return self.values[index];
     }
 
+    pub fn getChecked(self: PgRow, index: usize) error{ColumnOutOfBounds}!?[]const u8 {
+        if (index >= self.values.len) return error.ColumnOutOfBounds;
+        return self.values[index];
+    }
+
+    /// Required T or nullable ?T; text remains owned by this row.
+    pub fn getTyped(self: PgRow, comptime T: type, index: usize) !T {
+        return @import("decode.zig").value(T, try self.getChecked(index));
+    }
+
+    /// Deprecated in 0.3: use getTyped(?T, index); removal scheduled for 0.4.
     pub fn getInt(self: PgRow, index: usize, comptime T: type) !?T {
         const str = self.get(index) orelse return null;
         return try std.fmt.parseInt(T, str, 10);
     }
 
+    /// Deprecated in 0.3: use getTyped(?bool, index); removal scheduled for 0.4.
     pub fn getBool(self: PgRow, index: usize) !?bool {
         const str = self.get(index) orelse return null;
         if (str.len == 0) return null;

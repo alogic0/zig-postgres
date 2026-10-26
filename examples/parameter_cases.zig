@@ -15,7 +15,7 @@ fn next(c: *pg.PgClient) !void {
     defer r.deinit();
     var p = try c.queryParams("SELECT $1::bigint", .{@as(i64, 2)});
     defer p.deinit();
-    try require(try r.rows[0].getInt(0, i64) == 1 and try p.rows[0].getInt(0, i64) == 2);
+    try require(try r.rows[0].getTyped(?i64, 0) == 1 and try p.rows[0].getTyped(?i64, 0) == 2);
 }
 fn failed(c: *pg.PgClient, sql: []const u8, args: anytype, state: []const u8) !void {
     if (c.queryParams(sql, args)) |v| {
@@ -185,14 +185,14 @@ pub fn run(a: A, io: Io, config: pg.PoolConfig) !Outcome {
     defer scalars.deinit();
     const row = scalars.rows[0];
     try require(row.get(0) == null and row.get(1) == null and row.get(2).?.len == 0);
-    try require(try row.getBool(3) == true and try row.getBool(4) == false);
-    try require(try row.getInt(5, i64) == std.math.minInt(i64) and try row.getInt(6, i64) == std.math.maxInt(i64));
+    try require(try row.getTyped(?bool, 3) == true and try row.getTyped(?bool, 4) == false);
+    try require(try row.getTyped(?i64, 5) == std.math.minInt(i64) and try row.getTyped(?i64, 6) == std.math.maxInt(i64));
     try std.testing.expectEqualStrings(text, row.get(7).?);
     try std.testing.expectEqualStrings("00010203-0405-0607-0809-0a0b0c0d0e0f", row.get(8).?);
     try std.testing.expectEqualStrings("\\x00ff275c", row.get(9).?);
     try std.testing.expectEqualStrings("1234567890.123456789", row.get(10).?);
     try std.testing.expectEqualStrings("2030-01-02 03:04:05.123456", row.get(11).?);
-    try require(try row.getInt(12, i64) == 42);
+    try require(try row.getTyped(?i64, 12) == 42);
     for ([_]bool{ false, true }) |inside| {
         inline for (.{ .{ "SELEC 1", .{}, "42601" }, .{ "SELECT $1::integer", .{"invalid-integer"}, "22P02" }, .{ "SELECT 1/$1::integer", .{0}, "22012" } }) |case| {
             if (inside) try execute(c, "BEGIN");
@@ -248,7 +248,7 @@ pub fn run(a: A, io: Io, config: pg.PoolConfig) !Outcome {
     try require(c.reusable and c.transaction_status == .idle);
     var persisted = try observer.query("SELECT count(*),count(*) FILTER (WHERE id=1),count(*) FILTER (WHERE id=2),count(*) FILTER (WHERE id=4) FROM pg3_values");
     defer persisted.deinit();
-    try require(try persisted.rows[0].getInt(0, i64) == 2 and try persisted.rows[0].getInt(1, i64) == 1 and try persisted.rows[0].getInt(2, i64) == 0 and try persisted.rows[0].getInt(3, i64) == 0);
+    try require(try persisted.rows[0].getTyped(?i64, 0) == 2 and try persisted.rows[0].getTyped(?i64, 1) == 1 and try persisted.rows[0].getTyped(?i64, 2) == 0 and try persisted.rows[0].getTyped(?i64, 3) == 0);
     try next(c);
     var times: [7]i64 = undefined;
     inline for (std.meta.tags(@FieldType(Peer, "mode"))[0..7], 0..) |mode, index| times[index] = try fault(a, io, config, mode);
