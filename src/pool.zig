@@ -22,19 +22,40 @@ pub const PoolConfig = struct {
     tls: @import("tls.zig").Options = .{ .mode = .disable },
 };
 
+/// Gauges partition capacity; counters saturate and contain no connection data.
+pub const PoolStats = struct {
+    capacity: usize = 0,
+    idle: usize = 0,
+    borrowed: usize = 0,
+    connecting: usize = 0,
+    empty: usize = 0,
+    waiters: usize = 0,
+    initial_connections: u64 = 0,
+    reconnects: u64 = 0,
+    connection_failures: u64 = 0,
+    discards: u64 = 0,
+};
+
 pub const Pool = struct {
     allocator: Allocator,
     io: std.Io,
     config: PoolConfig,
     clients: []?*PgClient,
     in_use: []bool,
+    ever_connected: []bool,
+    counters: PoolStats = .{},
     mutex: std.Io.Mutex,
     cond: std.Io.Condition,
 
     pub fn init(allocator: Allocator, io: std.Io, config: PoolConfig) !*Pool {
         const pool = try initLazy(allocator, io, config);
         errdefer pool.deinit();
-        for (pool.clients) |*slot| slot.* = try pool.connect(null);
+        // Initialization is exclusive until this pool is published.
+        for (pool.clients, 0..) |*slot, i| {
+            slot.* = try pool.connect(null);
+            pool.ever_connected[i] = true;
+            pool.counters.initial_connections +|= 1;
+        }
         return pool;
     }
 
@@ -54,12 +75,17 @@ pub const Pool = struct {
         errdefer allocator.free(in_use);
         @memset(in_use, false);
 
+        const ever_connected = try allocator.alloc(bool, config.size);
+        errdefer allocator.free(ever_connected);
+        @memset(ever_connected, false);
+
         pool.* = .{
             .allocator = allocator,
             .io = io,
             .config = config,
             .clients = clients,
             .in_use = in_use,
+            .ever_connected = ever_connected,
             .mutex = .init,
             .cond = .init,
         };
@@ -67,13 +93,31 @@ pub const Pool = struct {
         return pool;
     }
 
+    /// The owner must join borrowers/waiters before destroying the pool.
     pub fn deinit(self: *Pool) void {
-        self.mutex.lockUncancelable(self.io);
+        for (self.in_use) |used| std.debug.assert(!used);
+        std.debug.assert(self.counters.waiters == 0);
+        // No concurrent users remain; closing sockets never holds the mutex.
         for (self.clients) |c| if (c) |client| client.close();
         self.allocator.free(self.clients);
         self.allocator.free(self.in_use);
-        self.mutex.unlock(self.io);
+        self.allocator.free(self.ever_connected);
         self.allocator.destroy(self);
+    }
+
+    pub fn stats(self: *Pool) PoolStats {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        var snapshot = self.counters;
+        snapshot.capacity = self.clients.len;
+        for (self.clients, self.in_use) |client, used| {
+            if (client != null) {
+                if (used) snapshot.borrowed += 1 else snapshot.idle += 1;
+            } else {
+                if (used) snapshot.connecting += 1 else snapshot.empty += 1;
+            }
+        }
+        return snapshot;
     }
 
     pub fn acquire(self: *Pool) !*PgClient {
@@ -117,20 +161,26 @@ pub const Pool = struct {
                     const client = self.connect(options.deadline) catch |err| {
                         self.mutex.lockUncancelable(self.io);
                         self.in_use[i] = false;
+                        self.counters.connection_failures +|= 1;
                         self.cond.signal(self.io);
                         self.mutex.unlock(self.io);
                         return err;
                     };
                     self.mutex.lockUncancelable(self.io);
                     self.clients[i] = client;
+                    if (self.ever_connected[i]) self.counters.reconnects +|= 1 else self.counters.initial_connections +|= 1;
+                    self.ever_connected[i] = true;
                     self.mutex.unlock(self.io);
                     return client;
                 }
             }
+            self.counters.waiters += 1;
             self.cond.wait(self.io, &self.mutex) catch |err| {
+                self.counters.waiters -= 1;
                 self.mutex.unlock(self.io);
                 return err;
             };
+            self.counters.waiters -= 1;
         }
     }
 
@@ -158,6 +208,7 @@ pub const Pool = struct {
                 std.debug.assert(self.in_use[i]);
                 self.clients[i] = null;
                 self.in_use[i] = false;
+                self.counters.discards +|= 1;
                 self.cond.signal(self.io);
                 self.mutex.unlock(self.io);
                 client.disconnect();

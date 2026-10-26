@@ -83,6 +83,20 @@ fn canceled(pool: *pg.Pool, started: *Io.Event) !void {
     defer pool.release(client);
     return error.UnexpectedAcquisition;
 }
+fn consistent(pool: *pg.Pool) !pg.PoolStats {
+    const snapshot = pool.stats();
+    try t.expectEqual(snapshot.capacity, snapshot.idle + snapshot.borrowed + snapshot.connecting + snapshot.empty);
+    return snapshot;
+}
+fn observe(pool: *pg.Pool) !void {
+    var prior: pg.PoolStats = .{};
+    for (0..100) |_| {
+        const now = try consistent(pool);
+        try t.expect(now.initial_connections >= prior.initial_connections and now.reconnects >= prior.reconnects and now.discards >= prior.discards and now.connection_failures >= prior.connection_failures);
+        prior = now;
+        try pool.io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
 fn churn(pool: *pg.Pool) !void {
     for (0..12) |i| {
         const c = try pool.acquireOpts(.{ .deadline = end(pool.io, 2000) });
@@ -112,6 +126,9 @@ test "ready idle connection wins over an earlier empty slot without reconnect" {
     try t.expect(ready == second);
     try query(ready);
     try t.expectEqual(@as(usize, 2), peer.connections.load(.acquire));
+    const snapshot = try consistent(pool);
+    try t.expect(snapshot.initial_connections == 2 and snapshot.reconnects == 0 and snapshot.discards == 1);
+    try t.expect(snapshot.borrowed == 1 and snapshot.empty == 1);
     try t.expect(!peer.failed.load(.acquire));
 }
 test "empty busy failed canceled and concurrent slots recover their ownership" {
@@ -122,21 +139,32 @@ test "empty busy failed canceled and concurrent slots recover their ownership" {
     defer server.cancel(io) catch {};
     const pool = try pg.Pool.initLazy(t.allocator, io, peer.config(2));
     defer pool.deinit();
+    try t.expectEqual(@as(usize, 2), (try consistent(pool)).empty);
     const first = try pool.acquire();
     const second = try pool.acquire();
+    try t.expectEqual(@as(usize, 2), (try consistent(pool)).borrowed);
     try t.expectError(error.Timeout, pool.acquireOpts(.{ .deadline = end(io, 30) }));
     var started: Io.Event = .unset;
     var waiter = try io.concurrent(canceled, .{ pool, &started });
     try started.wait(io);
+    const wait_end = end(io, 1000);
+    while ((try consistent(pool)).waiters == 0) {
+        if (Io.Timestamp.now(io, .awake).nanoseconds >= wait_end.nanoseconds) return error.WaiterNotObserved;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
     try t.expectError(error.Canceled, waiter.cancel(io));
+    try t.expectEqual(@as(usize, 0), (try consistent(pool)).waiters);
     pool.release(first);
     pool.release(second);
+    var observer = try io.concurrent(observe, .{pool});
+    defer observer.cancel(io) catch {};
     var left = try io.concurrent(churn, .{pool});
     defer left.cancel(io) catch {};
     var right = try io.concurrent(churn, .{pool});
     defer right.cancel(io) catch {};
     try left.await(io);
     try right.await(io);
+    try observer.await(io);
     const a = try pool.acquire();
     const b = try pool.acquire();
     pool.discard(a);
@@ -153,6 +181,8 @@ test "empty busy failed canceled and concurrent slots recover their ownership" {
         if (Io.Timestamp.now(io, .awake).nanoseconds >= cancel_end.nanoseconds) return error.ConnectNotObserved;
         try io.sleep(.fromMilliseconds(1), .awake);
     }
+    const pending = try consistent(pool);
+    try t.expect(pending.connecting == 1 and pending.borrowed == 0);
     try t.expectError(error.Canceled, connecting.cancel(io));
     try t.expect(!pool.in_use[0] and !pool.in_use[1]);
     peer.auth_limit.store(std.math.maxInt(usize), .release);
@@ -160,6 +190,9 @@ test "empty busy failed canceled and concurrent slots recover their ownership" {
     try query(recovered);
     pool.release(recovered);
     try t.expect(!pool.in_use[0] and !pool.in_use[1] and !peer.failed.load(.acquire));
+    const final = try consistent(pool);
+    try t.expect(final.initial_connections == 2 and final.reconnects > 0 and final.connection_failures == 2 and final.discards == 10);
+    try t.expect(final.waiters == 0 and final.borrowed == 0 and final.connecting == 0 and final.idle == 1 and final.empty == 1);
 }
 
 fn health(pool: *pg.Pool, started: *Io.Event) !void {

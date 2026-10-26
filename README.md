@@ -417,3 +417,20 @@ is `TooManyRows`. They finish protocol/error processing before returning.
 and applies the same cardinality rule; late database errors take precedence.
 The caller still owns and must deinit the iterator and release its connection.
 Allocation failure invalidates the stream so release discards the connection.
+
+## Pool statistics
+
+`const snapshot = pool.stats();` returns a synchronized `PoolStats` containing
+only numbers. `idle + borrowed + connecting + empty == capacity` at that instant.
+Connected checked-out slots are borrowed; reserved slots still authenticating
+are connecting. Waiters counts condition-variable waits, excluding mutex entry
+and connection attempts; cancellation removes the waiter before returning.
+
+Saturating u64 lifetime counters are `initial_connections` (first successful
+connection for each slot), `reconnects` (successful replacements after discard),
+`connection_failures` (failed/canceled establishment attempts, including initial
+attempts on lazy pools) and `discards` (explicit or unsafe-release destruction).
+A canceled pool waiter is not a connection failure. Failed eager initialization
+returns no pool/snapshot. Snapshot/counter synchronization performs no network I/O;
+connect/disconnect happen outside the lock. Join all borrowers/waiters before
+pool deinit. Gauges expose no credentials, SQL, parameters or customer values.

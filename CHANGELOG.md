@@ -16,6 +16,10 @@ Docker-free. Bounded health checks share one acquisition/query deadline.
 Owned URI configuration, finite float binding, exact final command counts and
 optional-single-row helpers preserve completion errors and explicit ownership.
 
+Pool.stats exposes synchronized capacity/idle/borrowed/connecting/empty/waiter
+gauges and saturating initial/replacement/failure/discard counters without I/O
+under synchronization or query/customer data in snapshots.
+
 ## 0.3.0 — October 25, 2026
 
 PG4A adds DNS, absolute connection/authentication/pool-acquisition deadlines and

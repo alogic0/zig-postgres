@@ -32,6 +32,7 @@ pub const PgError = client.PgError;
 pub const PgRow = client.PgRow;
 pub const PgResult = client.PgResult;
 pub const Pool = pool.Pool;
+pub const PoolStats = pool.PoolStats;
 pub const PoolConfig = pool.PoolConfig;
 pub const Transaction = transaction.Transaction;
 
