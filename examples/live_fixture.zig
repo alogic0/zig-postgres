@@ -265,7 +265,15 @@ const State = struct {
     }
     fn save(self: *State, failure: ?[]const u8, failed_phase: []const u8) !void {
         const revision = self.checked(&.{ "git", "rev-parse", "HEAD" }, end(self.io, 1000), 1000) catch "unavailable";
-        const rss = Io.Dir.cwd().readFileAlloc(self.io, "/proc/self/status", self.a, .limited(65536)) catch "";
+        // procfs reports size zero; use streaming reads instead of the regular
+        // file-size optimization, which otherwise returns an empty measurement.
+        const rss = blk: {
+            const file = Io.Dir.cwd().openFile(self.io, "/proc/self/status", .{}) catch break :blk "";
+            defer file.close(self.io);
+            var buffer: [4096]u8 = undefined;
+            var reader = file.readerStreaming(self.io, &buffer);
+            break :blk reader.interface.allocRemaining(self.a, .limited(65536)) catch "";
+        };
         var peak_rss_kib: ?usize = null;
         var lines = std.mem.splitScalar(u8, rss, '\n');
         while (lines.next()) |line| if (std.mem.startsWith(u8, line, "VmHWM:")) {
