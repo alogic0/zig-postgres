@@ -1,3 +1,14 @@
 .zig-cache/
 zig-pkg/
 zig-out/
+
+# Local credentials and editor files
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.DS_Store
+
+# Locally generated release archives
+/postgres-*.tar.gz

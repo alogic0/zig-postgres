@@ -7,5 +7,5 @@
         // Verification tooling only; the public runtime module imports none.
         .process = .{ .url = "https://github.com/alogic0/zig-process/archive/4826a4973b20b65ded5f0fb79d5eb49694024398.tar.gz", .hash = "process-0.5.1-BnTYqEE4AgB9ILj1BL2rdfggzRIWzFNVP7lO_MFvVZl8" },
     },
-    .paths = .{ "build.zig", "build.zig.zon", ".zigversion", "src", "examples", "README.md", "CHANGELOG.md", "docs" },
+    .paths = .{ "build.zig", "build.zig.zon", ".zigversion", "src", "examples", "tests", "tools", "README.md", "CHANGELOG.md", "LICENSE", "CONTRIBUTING.md", "docs" },
 }

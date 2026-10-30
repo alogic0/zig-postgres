@@ -1,0 +1,10 @@
+.{
+    .name = .consumer,
+    .version = "0.0.0",
+    .fingerprint = 0x705b37274687cf77,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .postgres = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "main.zig" },
+}

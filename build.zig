@@ -68,12 +68,26 @@ pub fn build(b: *std.Build) void {
     run_controls.setCwd(b.path("."));
     run_controls.has_side_effects = true;
     b.step("test-live-controls", "Verify startup, command/case timeout, interruption and cleanup failure").dependOn(&run_controls.step);
+    const package_checker = b.addExecutable(.{
+        .name = "postgres-check-package",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_package.zig"),
+            .target = b.graph.host,
+            .optimize = .debug,
+        }),
+    });
+    const run_package_checker = b.addRunArtifact(package_checker);
+    run_package_checker.addArg(b.graph.zig_exe);
+    run_package_checker.setCwd(b.path("."));
+    run_package_checker.has_side_effects = true;
+    b.step("check-package", "Build the archived README consumer with fresh caches in all four settings").dependOn(&run_package_checker.step);
     // The CI entrypoint always checks both supported profiles and TLS settings.
     // These compile the opt-in network fixtures but never execute them.
     const ci = b.step("ci", "Offline format/public/live-consumer/test matrix: Debug/Safe, plaintext/TLS");
-    const format = b.addSystemCommand(&.{ "zig", "fmt", "--check", "build.zig", "src", "examples" });
+    const format = b.addSystemCommand(&.{ "zig", "fmt", "--check", "build.zig", "build.zig.zon", "src", "examples", "tests/package", "tools" });
     format.setCwd(b.path("."));
     ci.dependOn(&format.step);
+    ci.dependOn(&package_checker.step);
     inline for ([_]@TypeOf(optimize){ .debug, .safe }) |mode| {
         inline for (.{ false, true }) |with_tls| {
             const suffix = @tagName(mode) ++ (if (with_tls) "-tls" else "-plain");

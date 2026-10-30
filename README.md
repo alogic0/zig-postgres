@@ -1,436 +1,162 @@
 # zig-postgres
 
-Version 0.3.0, Zig 0.17.0 package exporting `postgres`. It builds with the Zig standard library.
+A PostgreSQL wire protocol v3 client for Zig 0.17.0, with connection pooling,
+bound parameters, transactions, streaming rows, and optional verified TLS.
+The runtime is written in Zig and has no third-party Zig dependencies.
 
-The [improvement plan](docs/plans/2026-10-25.md) tracks pool availability, strict
-row decoding, standalone live acceptance, bounded health checks, common helpers
-and pool statistics.
+The package version is **0.3.0**. Changes since that release are listed under
+[Unreleased](CHANGELOG.md). The supported test platform is Linux x86_64 with
+PostgreSQL 16.13; TLS uses the system OpenSSL 3 runtime. Other platforms and
+server versions have not been validated.
 
-The accepted capability set is PG0–PG5 with PG6 release gates. Tested with
-Zig0.17.0, PostgreSQL16.13 and Linux x86_64; TLS additionally uses OpenSSL3.0.13.
-
-| Capability | Delivered behavior |
+| Feature | Behavior |
 | --- | --- |
-| Transactions/pool | Validated ready state; busy/failed/open sessions discarded; joined500ms cleanup |
-| Queries | Bounded owned text/null results; single-statement bound parameters |
-| Deadlines | Absolute connect/auth/acquire/query/commit bounds; cleanup has its own budget |
-| Addresses | DNS, IPv4 and IPv6; selected remote endpoint retained for cancellation |
-| TLS | Optional verified CA/DNS/IP identity; encrypted cancellation; no fallback |
-| Streaming | Separate iterators, expiring views, explicit copies and safe abandoned-stream release |
-| Parameters | Null, bool, bigint-compatible integers, text, UUID and bytea hex |
-| Retry/session state | Caller owns retry decisions and session restoration; unknown commits stay unknown |
+| Queries | Owned text/null results and single-statement bound parameters |
+| Pooling | Concurrent acquisition, bounded health checks, numeric statistics |
+| Transactions | Validated session state and bounded rollback cleanup |
+| Deadlines | Absolute connection, authentication, acquisition, and query budgets |
+| Addresses | DNS, IPv4, and IPv6 |
+| TLS | Optional CA and hostname/IP verification, encrypted cancellation |
+| Streaming | Borrowed rows, checked lifetimes, and explicit owned copies |
+| Helpers | URI parsing, checked scalar decoding, command counts, optional single rows |
 
-From this directory:
+## Build and test
+
+Install the compiler version in [`.zigversion`](.zigversion) from
+[Zig's downloads](https://ziglang.org/download/), then run:
 
 ```sh
 zig build
 zig build check test
-zig build check test -Doptimize=ReleaseSafe
-zig build ci --summary all
+zig build check test -Doptimize=safe
+zig build ci -j4 --summary all
+zig build check-package -j4 --summary all
 ```
 
-The default builds `zig-out/bin/postgres-probe`, a public-API consumer. Building
-and offline tests open no database connections. Running the probe explicitly
-uses `PGUSER`, `PGPASSWORD`, `PGDATABASE` and optional `PGHOST`/`PGPORT`; it executes
-`BEGIN`, bound `SELECT $1::bigint`, `COMMIT`. Live authentication and cancellation regressions
-remain owned by the backend fixtures.
+The default build produces `zig-out/bin/postgres-probe`. Building it does not
+connect to a database. `ci` checks formatting, runs offline tests (including
+loopback protocol peers), and compiles the public examples and live fixtures in
+Debug and Safe, with TLS enabled and disabled. It requires no running PostgreSQL
+or Docker daemon. The first build fetches the verification dependency pinned in
+`build.zig.zon`. GitHub Actions runs CI on pushes and pull requests.
+`check-package` archives the current package paths and compiles the README example
+from that archive with fresh caches in all four settings.
 
-Consumers add a `postgres` dependency pointing to this checkout, for example
-`.postgres = .{ .path = "../zig-postgres" }` in `build.zig.zon`, and import
-`b.dependency("postgres", .{ .target = target, .optimize = optimize }).module("postgres")`.
-The public root exports `PgClient`, `PgError`, `PgRow`, `PgResult`, `Pool`,
-`PoolConfig`, `Transaction` and the `client`, `pool`, `scram`, `diagnostic`,
-`cancel`, `transaction` namespaces. Backend compatibility adapters re-export
-these declarations; they do not introduce distinct client or transaction types.
+The [probe](examples/probe.zig) is a complete public-API example. To run it against
+a local disposable database, provide `PGUSER`, `PGPASSWORD`, and `PGDATABASE`,
+with optional `PGHOST` and `PGPORT`. It uses plaintext, bound SELECT queries,
+streaming, and an explicit transaction.
 
-Client/result allocations belong to their supplied allocator. Destroy results
-with `deinit`, close directly owned clients with `close`, and release or discard
-pool borrowers before destroying the pool. Pool configuration strings outlive
-the pool. Cancellation invalidates an incomplete connection exchange; pool
-release automatically discards non-reusable clients and sessions still inside
-an open or failed transaction. `transaction_status` records the last validated
-ReadyForQuery state; an incomplete exchange is unknown. Explicit `discard` also
-invalidates a borrower. Transaction cleanup rolls back an uncommitted reusable
-client under one joined 500 ms budget, including an already-canceled caller. A
-failed or expired cleanup invalidates the connection. A lost COMMIT response
-remains ambiguous; successful commit waiting does not use the cleanup timeout.
+## Install
 
-This is the existing bounded wire-v3 client, not a complete PostgreSQL driver.
-It supports text simple/parameterized queries and trust/cleartext/SCRAM-SHA-256 authentication.
-MD5 authentication is unsupported and returns `UnsupportedAuthType`.
-Optional verified TLS is described below. Channel binding and automatic retries
-remain unsupported. PG4A adds hostname resolution and bounded connection/
-acquisition options. Startup authentication payloads retain their 1024-byte bound;
-SASLprep remains unsupported. SCRAM iterations are capped before PBKDF2. Simple-query frames now validate lengths, row
-descriptions, text cells, command/error terminators and ready status. Unsupported
-protocol states invalidate the connection. Raw server message bytes are not
-printed; diagnostics retain only owned SQLSTATE and the existing cached-query
-signal. Error-response recovery has its own joined 500 ms bound. Normal successful
-query/commit waiting has no cleanup timeout. Selected acceptance is recorded in
-the development receipt; broader protocol and product acceptance remain separate.
-
-Application SQL, schemas, repositories, startup policy, after-commit effects and
-disposable database ownership remain outside this package.
-
-`query` fully consumes the response and allocates owned text/null cells. Results
-remain valid across subsequent queries until `deinit`; the current row API has
-no column metadata. Pool destruction requires all borrowers to have returned.
-Borrowers that change session settings, create temporary objects or hold session
-advisory locks must restore their state or call `Pool.discard`. The pool does not
-perform a full session reset.
-
-`zig build build-live` compiles `zig-out/bin/postgres-verify` without executing it.
-The opt-in verifier requires `POSTGRES_TEST_DATABASE` from the backend's existing
-disposable schema lease and `POSTGRES_TEST_REPORT` for its JSON report. It checks
-the exact database ownership marker before writes, uses the local acceptance
-PostgreSQL endpoint (optional `POSTGRES_TEST_PORT` for its owned relay), and
-rejects unowned databases. Run one verifier per lease at
-a time. The verifier owns its `pg_development_rows`/`pg3_values` tables, commit-delay
-function and loopback peers;
-the existing schema process owns database creation, migration and removal.
-
-Set `client.limits` before queries or pass `.limits` in `PoolConfig`. SQL admission
-fails before sending and preserves connection/transaction state. Response limit,
-allocation, framing or incomplete-I/O failures invalidate the connection; pool
-release discards it. The defaults are:
-
-| Limit | Default |
-| --- | --- |
-| SQL text | 16 MiB |
-| Whole message including tag/length | 16 MiB |
-| One text cell | 8 MiB |
-| Logical retained row/cell/command-tag bytes | 64 MiB |
-| Rows across all results in a simple query | 100000 |
-| Columns in one row set | 1024 |
-
-The transient frame buffer and row-list spare capacity are additional bounded
-allocations. SQL and message limits also respect the wire's signed length fields
-even if configured higher. The materialized simple-query API continues to
-concatenate rows from multiple statements and returns the last command tag.
-An error returns no partial result, including a later failure after earlier
-statements completed. Notices and parameter status are consumed without retaining
-server message text. Binary-format results and COPY are explicitly unsupported.
-
-`queryParams(sql, tuple)` binds a single statement using unnamed Parse/Bind/
-Describe/Execute and exactly one Sync. SQL and values travel separately. The
-server rejects multiple statements; semicolons inside literals/values work.
-The API returns the same owned `PgResult` and waits through ReadyForQuery,
-including implicit commit and deferred constraints. Parse/Bind/Execute/Sync errors
-retain SQLSTATE. A synchronized error inside a transaction remains failed until
-explicit rollback; Sync does not roll back that transaction. No request is replayed.
+For a local checkout, add this entry to your `build.zig.zon` dependencies:
 
 ```zig
-var result = try client.queryParams(
-    "SELECT $1::text, $2::boolean",
-    .{ "prospect's follow-up", true },
-);
-defer result.deinit();
+.postgres = .{ .path = "../zig-postgres" },
 ```
 
-Values admit null/typed null, bool, integers representable by signed bigint,
-byte strings, `Uuid{ .bytes = [16]u8{...} }` and `Binary{ .bytes = bytes }`.
-Binary binds bytea hex text, including zero bytes; ordinary text/SQL reject NUL.
-Use explicit SQL casts for null/custom types, exact decimal and timestamp text.
-Floats, general arrays and arbitrary structs are unsupported. Preflight checks
-all types/counts/encoded lengths and allocates the complete request before I/O;
-rejection leaves transaction state unchanged. Defaults:1024parameters and32MiB
-for all encoded request bytes, configurable through `Limits`. Each wire length
-also fits its signed field. Result format remains text.
+After the repository is published, fetch an immutable commit archive with
+`zig fetch --save=postgres <archive-url>` to record its URL and content hash.
+For GitHub, the archive URL has the form
+`https://github.com/<owner>/zig-postgres/archive/<full-commit-sha>.tar.gz`.
+Use a commit or release tag when selecting a version.
 
-`queryParamsOpts(sql, tuple, .{ .deadline = end })` accepts an optional absolute
-`std.Io.Timestamp` from the awake clock. The operation deadline covers admission,
-request write and the final validated ReadyForQuery. The convenience call imposes
-no operation timeout. `queryOpts` provides the same bound for legacy SQL;
-`const scope = client.withDeadline(end); defer scope.deinit();` bounds a sequence,
-including explicit COMMIT. Nested scopes/options can only tighten the deadline.
-Bounded in-memory admission finishes before its deadline is checked again.
-
-Normal Execute/CommandComplete never starts a cleanup timer. A slow successful
-commit may exceed500ms within the operation deadline. On observed server error,
-cancellation or operation expiry, cleanup gets its separate absolute500ms bound;
-partial reads/helpers cannot restart it. Error recovery can therefore outlast the
-operation deadline by that allowance. Failed/incomplete recovery invalidates;
-response loss during commit remains an unknown outcome. Rollback cleanup ignores
-an expired normal scope and uses its own joined budget. All joined I/O tasks finish
-before buffers/client ownership return to the caller.
-
-`zig build build-wire-check` compiles an independent opt-in receipt checker for
-the backend's framed protocol relay. It checks the real delayed commit and
-Execute-success/Sync-failure sequence and rejects four receipt corruptions.
-
-
-Accepted capability set for0.2.0 (PG0–PG3):
-
-| Capability | Status |
-| --- | --- |
-| Numeric/localhost TCP; trust/password/SCRAM-SHA-256 | Supported |
-| Owned text/null results, simple multi-statements | Supported |
-| Single-statement bound scalar/UUID/bytea parameters | Supported |
-| Transaction-aware pool release and bounded rollback | Supported |
-| Query/sequence operation deadlines; separate error cleanup | Supported |
-| DNS/TLS/general connect-pool-auth deadlines | Later consumer milestones |
-| Streaming/column metadata/binary results/COPY | Outside this release |
-
-Debug/ReleaseSafe driver and selected native note API/SQL checks use PostgreSQL16.13.
-This records one tested server version. The [changelog](CHANGELOG.md) identifies
-feature boundaries and the consumer rollback requirement. Pin the source archive with its package hash.
-
-Unreleased PG4A connection options add `PgClient.connectOpts(allocator, io, options)`
-and `Pool.acquireOpts(options)`. Supply an absolute awake-clock `deadline` for
-one budget across DNS resolution, TCP connect and authentication, or across pool
-mutex/wait/connect/authentication. Positional `connect` and plain `acquire` remain
-caller-cancelable compatibility wrappers without an imposed timeout. Pool config
-can set `connect_timeout_ms` for every newly opened slot; a caller acquisition
-deadline can only shorten it. Connection options/credentials remain borrowed
-until connect returns; PoolConfig strings outlive the pool.
-
-Hostnames use Zig0.17's resolver; numeric IPv4/IPv6 bypass DNS. Resolved addresses
-are attempted in resolver order within the same budget. The selected remote
-address is retained explicitly for CancelRequest, since Zig's socket address is
-local. No write is automatically retried. Startup failures join work and free
-sockets/allocations; an unsuccessful acquisition returns its reserved slot.
-
-`max_scram_iterations` defaults to100000, configurable from1through1000000.
-Server iterations above the selected cap fail before PBKDF2; the absolute upper
-bound prevents arbitrarily expensive configured work. Derivation is synchronous
-and finite; deadlines do not preempt individual crypto instructions. ASCII proof/
-nonce behavior is preserved; this does not add SASLprep or channel binding.
-Successful operation/commit deadlines remain separate from500ms cleanup.
-
-Optional verified TLS (PG4B) uses `-Dtls=true` when building this package or
-`.tls = true` in the dependency arguments. TLS builds link libc and dynamically load `libssl.so.3`;
-plaintext builds require neither OpenSSL nor libc for the driver. The supported
-fixture tuple is Linux, Zig0.17.0, OpenSSL3.0.13 and PostgreSQL16.13. Other platforms,
-OpenSSL versions and server versions have no acceptance claim here.
-
-`connectOpts` defaults to `.tls.mode = .verify_full`. TLS-disabled builds reject
-that configuration with `TlsUnavailable` before any network or authentication.
-Legacy positional `connect` and `PoolConfig` retain explicit plaintext defaults;
-set `.tls = .{ .ca_file = "/path/to/ca.pem" }` on the pool to require TLS.
-The default CA file is `/etc/ssl/certs/ca-certificates.crt`, bounded to4MiB.
-`server_name` optionally separates the verified DNS/IP identity from the network
-host. DNS identities also supply SNI; IP identities use IP certificate matching.
-Chain/identity verification and a TLS1.2 minimum are mandatory. TLS refusal,
-bad certificates and failed handshakes never fall back to plaintext.
-
-OpenSSL memory BIOs do CPU work while Zig owns all socket reads/writes and their
-joined absolute deadlines. Handshake, queries and encrypted CancelRequest obey
-the same operation/cleanup budgets as plaintext. CancelRequest uses a separate
-verified encrypted connection. Closing a client sends Terminate within500ms and
-then frees its socket/session without a blocking TLS shutdown. SSL/CTX/BIO
-resources have per-owner destruction; the loaded library remains process-owned.
-
-`zig build build-tls-certs` builds an opt-in local certificate adapter; it accepts
-only an absolute `zg-postgres-tls-*` directory and uses the installed OpenSSL CLI.
-The TLS-enabled live verifier additionally requires `POSTGRES_TEST_TLS_CERTS`
-pointing to that generated fixture. It exercises trusted DNS/IP identities,
-negative certificate/handshake cases, encrypted cancellation, rollback and a
-real committed write whose acknowledgement is lost. No production endpoint is
-required. Client certificates and SCRAM-SHA-256-PLUS remain separately scoped.
-
-`streamQuery(sql, options)` and `streamParams(sql, tuple, options)` return an owned
-`*PgStream`. Call `deinit` exactly once. These are separate from the unchanged
-materialized APIs. A client has one SQL owner: other queries/streams return
-`ConnectionBusy` until completion or invalidation. Clients are not safe for
-concurrent calls; cancel and join a reading task before releasing its borrower.
+In your `build.zig`, add the module to your executable:
 
 ```zig
-const rows = try client.streamParams("SELECT $1::text", .{"follow-up"}, .{});
-defer rows.deinit();
-while (try rows.next()) |row| {
-    const value = (try row.get(0)).?; // valid until next/close/client destruction
-    _ = value;
-    var saved = try row.copy(allocator);
-    defer saved.deinit(); // owned cells may outlive the iterator
+const postgres = b.dependency("postgres", .{
+    .target = target,
+    .optimize = optimize,
+    // .tls = true, // Enable verified TLS support.
+});
+exe.root_module.addImport("postgres", postgres.module("postgres"));
+```
+
+A small application can acquire a connection and read a bound query:
+
+```zig
+const std = @import("std");
+const pg = @import("postgres");
+
+pub fn main(init: std.process.Init) !void {
+    const env = init.environ_map;
+    const pool = try pg.Pool.initLazy(init.gpa, init.io, .{
+        .host = env.get("PGHOST") orelse "127.0.0.1",
+        .port = try std.fmt.parseInt(u16, env.get("PGPORT") orelse "5432", 10),
+        .user = env.get("PGUSER") orelse return error.PGUSERRequired,
+        .password = env.get("PGPASSWORD") orelse return error.PGPASSWORDRequired,
+        .database = env.get("PGDATABASE") orelse return error.PGDATABASERequired,
+        .size = 4,
+        .connect_timeout_ms = 5000,
+    });
+    defer pool.deinit();
+
+    const end = std.Io.Timestamp.now(init.io, .awake)
+        .addDuration(.fromMilliseconds(5000));
+    const client = try pool.acquireOpts(.{ .deadline = end });
+    defer pool.release(client);
+
+    var result = try client.queryParamsOpts(
+        "SELECT $1::bigint, $2::text",
+        .{ @as(i64, 42), "hello" },
+        .{ .deadline = end },
+    );
+    defer result.deinit();
+
+    const id = try result.rows[0].getTyped(i64, 0);
+    const text = try result.rows[0].getTyped([]const u8, 1);
+    std.debug.print("{d}: {s}\n", .{ id, text });
 }
 ```
 
-A borrowed row requires its iterator to remain alive. `get`/`copy` return
-`StaleRow` after advancing, closing or client destruction. Previously extracted
-slices cannot check their own lifetime. The iterator owns frame/view/tag buffers
-independently of the client: releasing an unfinished borrower discards that client,
-and the iterator may then safely be destroyed (or `next` returns `StreamClosed`).
-Its allocator must outlive it. Early `close` invalidates; neither close nor deinit
-reads/drains/writes the network. Release/discard/close the client to close its
-socket. Unfinished transaction cleanup also invalidates an active stream.
+This example uses plaintext for a local database. To require TLS, build the
+dependency with `.tls = true` and set the pool's
+`.tls = .{ .ca_file = "/path/to/ca.pem" }`. TLS builds link libc and dynamically
+load `libssl.so.3`; the plaintext runtime needs neither. TLS verification failures
+never fall back to plaintext. `ConnectOptions` defaults to verified TLS, whereas
+`PoolConfig` and the legacy positional `connect` default to plaintext.
 
-Rows are provisional until `next` returns null after validated ReadyForQuery.
-Execute/CommandComplete is insufficient: a later Sync/deferred-constraint error
-returns failure with SQLSTATE, even after rows were yielded. Synchronized errors
-permit subsequent queries outside a transaction; failed transactions still need
-rollback. Operation deadlines are absolute across all next calls and final commit
-waiting; failures use the same joined500ms recovery budget. Closing or losing an unfinished write leaves its outcome unknown; discarding
-does not prove rollback. No request is replayed.
+## Ownership and limitations
 
-StreamOptions.max_buffer_bytes defaults to32MiB for one frame payload, column
-views and the retained command tag. Normal message/cell/column/row/SQL/request
-limits still apply; max_result_bytes applies only to materialized results.
-The driver retains no accumulated row contents. The client I/O buffers, iterator
-object and input request are additional bounded allocations. Existing text/null
-values support the selected CSV consumer; binary codecs and column metadata
-remain outside this release's consumer requirements.
+Destroy owned results with `deinit`, close directly owned clients with `close`,
+and release or discard pool borrowers before destroying the pool. Configuration
+strings must outlive their pool. Each client permits one query or stream at a time.
+Borrowed streaming values expire when the iterator advances or closes; copy them
+when they must live longer. A stream is successful only after it reaches the
+final validated ReadyForQuery message.
 
-`zig build build-measure` compiles an opt-in frozen500-row/144KiB JSON-page
-comparison. It requires the same owned database/report variables as the verifier.
-The old default64MiB materialized limit fails; a128MiB comparison completes and
-has the same ordered digest as streaming. Logical driver heap is 181114bytes (about177KiB);
-the backend's actual CSV projection measures about1.43MB, below its declared5MiB
-budget for that workload. Allocator metadata/shared I/O/HTTP/kernel/OpenSSL/server
-memory are excluded; this is not process RSS or a universal bound for arbitrary
-payloads/observations. The CSV owner stages a single streamed page in an immediately unlinked0600
-temporary file (128MiB maximum per page), gathers phone keys and loads saved
-observations, then releases its read transaction/slot before projecting CSV.
-One row arena bounds output heap. Configured import temporary-directory candidates
-select scratch storage; close/process exit removes the unlinked file. This preserves
-snapshot/coercion behavior and SQL release under HTTP backpressure. Throughput and
-scratch bytes are reported separately; no speedup is claimed.
+The driver supports trust, cleartext password, and SCRAM-SHA-256 authentication.
+MD5, SASLprep, channel binding, COPY, binary result formats, and column metadata
+are unsupported. There are no automatic retries. A lost COMMIT response leaves
+its outcome unknown. Borrowers must restore changed session settings or discard
+the connection; the pool does not perform a full session reset.
 
-`zig build ci` is the offline CI entrypoint. It checks formatting and compiles
-public, live-verifier, measurement, wire-check and certificate-adapter consumers
-in Debug/ReleaseSafe with TLS enabled/disabled; it runs32offline tests. Live
-fixtures are compiled, never executed by CI. The same command works in a hosted
-runner with the pinned toolchain; this local checkout has no configured remote
-CI service, and the retained release receipt records local execution.
+See the [API and ownership guide](docs/api.md) for query limits, deadline and
+cleanup behavior, streaming contracts, TLS options, decoding, and helper APIs.
 
-A local release archive is reproducible from its exact commit:
+## Live PostgreSQL acceptance
+
+The standalone suite creates and removes its own digest-pinned PostgreSQL 16
+Docker container, volume, database, and local TLS certificates. It does not use
+an existing application database. Linux/amd64 and Docker are required; TLS cases
+also require OpenSSL 3 and the `openssl` CLI.
 
 ```sh
-git archive --format=tar --prefix=postgres-0.3.0/ HEAD | gzip -n > postgres-0.3.0.tar.gz
-zig fetch file:/absolute/path/postgres-0.3.0.tar.gz
+zig build test-live -j4
+zig build test-live -Doptimize=safe -j4
+zig build test-live -Dtls=true -j4
+zig build test-live -Doptimize=safe -Dtls=true -j4
+zig build test-live-controls -j4
 ```
 
-Use the returned content hash in a dependency with that archive URL. Release
-evidence builds independent consumers with initially empty caches in all four
-profile/TLS combinations.
+Reports are written to `zig-out/live-*.json` and include test results, fixture
+identity, deadlines, and cleanup status. The **PostgreSQL live acceptance**
+workflow runs this suite when manually dispatched from GitHub Actions.
 
-Returning a consumer to0.2.0 requires reverting streaming/export admission,
-PG4A note-acquisition options and PG4B build/fixture options with the package pin.
-The new APIs are absent from0.2.0. Revert those consumer commits in reverse order;
-no database schema downgrade is needed. Borrower/row ownership, bounded cleanup
-and uncertain-commit policy must remain consistent during a rollback.
+## Contributing and license
 
-## Checked rows (additive 0.3 API)
+See [CONTRIBUTING.md](CONTRIBUTING.md) for checks and
+[the release guide](docs/releasing.md) for publishing a pinned package archive.
+Historical implementation notes are in [the improvement plan](docs/plans/2026-10-25.md).
 
-Use `row.getChecked(index)` for bounded nullable text, or
-`row.getTyped(T, index)` for `[]const u8`, `bool`, integer or floating types.
-Use `?T` for SQL NULL; required NULL raises `UnexpectedNull`. Empty text stays
-empty; it is invalid as a boolean or number. Booleans accept exactly `t`/`f`.
-Integer overflow, invalid values and column bounds are errors. Floating getters
-accept PostgreSQL's `NaN`, `Infinity`, `-Infinity`; a finite decimal overflowing
-the destination type is an error. This differs from finite-only binding.
-
-Both PgRow and BorrowedRow share conversion. Borrowed getters check generation
-before even checking bounds; strings expire on advancement/close and must be
-copied to outlive the stream. The iterator itself must still be alive when a row
-is accessed. `get`, `getInt`, `getBool` retain their permissive 0.3 behavior for
-compatibility and are deprecated. Removal/signature changes are scheduled for
-the explicitly breaking 0.4 release, not this additive candidate.
-
-```zig
-const id = try result.rows[0].getTyped(i64, 0);
-const flag = try result.rows[0].getTyped(?bool, 1);
-const text = try borrowed.getTyped([]const u8, 2); // until next()/close()
-```
-
-## Standalone live acceptance
-
-`zig build ci -j4 --summary all` remains offline (loopback peers, no Docker or
-PostgreSQL). `zig build test-live -j4` is opt-in and requires Linux/amd64, Docker,
-Zig 0.17.0 and, for `-Dtls=true`, the OpenSSL 3 runtime and `openssl` CLI. Repeat
-with `-Doptimize=safe`, `-Dtls=true`, and both. No application repository, schema
-lease or existing application database is used. Zig fetches the verification
-helper pinned in `build.zig.zon`.
-
-The owner uses the plan's digest-pinned PostgreSQL 16 image and a dynamically
-published loopback port. A random exact label guards its named container/volume;
-its database has a separate marker. Cleanup is registered before startup and
-removes only these exact identities and its marked private certificate/work
-directory. Reports are retained outputs, not temporary fixture resources.
-
-Default limits are pull180s, command/certificate30s, startup60s, each case-group30s
-(a stronger bound for every case within it), tests300s, whole run600s and
-independent cleanup30s. Every command/poll uses its phase's remaining budget.
-Driver operation/cleanup deadlines remain separate. SIGINT/SIGTERM cancel and
-join work/subprocess groups before cleanup. Cleanup failure fails the run and
-reports exact owner/container/volume/directory IDs for recovery; it is never
-reported as successful cleanup. CI's explicit manual live job allows compilation
-plus run/cleanup and uses the same four settings.
-
-Set `POSTGRES_LIVE_REPORT` for a fresh report outside build outputs; otherwise it
-uses `zig-out/live-<mode>-<plain|tls>.json`. Finite positive `u32` millisecond
-overrides are `POSTGRES_LIVE_{PULL,COMMAND,STARTUP,CASE,TEST,RUN,CLEANUP}_MS` and are
-recorded in each report. `test-live-controls` verifies failed startup, a controlled
-stalled Docker-command boundary, hung case, outer timeout, failed cleanup with
-exact-marker recovery and cooperative INT/TERM. Test-only controls use private
-synthetic subprocesses; they never stop the host Docker daemon.
-
-Reports contain package/compiler/server/OpenSSL identity, image digest/ID/platform,
-settings/deadlines, generic protocol/parameter/transaction/network/stream/TLS and
-checked-row results, resource IDs and cleanup. Pure driver heap measurements
-(streaming500rows/73.7MB) are distinct from process peak RSS. The legacy
-verifier and measurement tool read `PGUSER` and `PGPASSWORD` and check the
-database comment before writing. The default comment is
-`zig-postgres disposable schema fixture <database>`. For an existing fixture,
-set `POSTGRES_TEST_MARKER` to the exact comment supplied by its creator.
-
-## Bounded health
-
-`try pool.healthCheckOpts(.{ .deadline = absolute_awake_timestamp })` gives one
-budget to acquisition/connect/SELECT1 and releases or discards the borrower on
-every exit. Query recovery retains its separate joined cleanup allowance, so
-return can follow the operation deadline by that bounded cleanup interval.
-Timeout/cancellation are errors for the caller to map to its health response.
-`healthCheck()` remains an unbounded compatibility wrapper returning false on
-errors; use the bounded API for service endpoints. Waiting for acquisition never
-renews the SELECT budget.
-
-## Common helpers
-
-`ParsedUri.parse(allocator, text)` (or `fromUri(allocator, std.Uri)`) owns every
-configuration string until `deinit`; input can be freed immediately. It accepts
-postgres/postgresql, percent encoding, IPv4/IPv6, default port5432 and supported
-TLS options (`sslmode=disable|verify-full`, `sslrootcert`, `sslservername`).
-Malformed escapes, NUL, duplicate/unknown options and unsupported security modes
-fail before network use. Application pool size, deadlines and retry policy remain
-caller choices; keep the parsed owner alive until the pool is destroyed.
-
-Bind `try finiteFloat(number)` for finite f64 values, including negative zero,
-using round-trip-safe text. NaN/infinity and bypassed invalid wrappers fail during
-request admission before any exchange. Exact decimals should remain decimal text
-with explicit SQL casts, not be converted through f64. Raw floats remain unsupported.
-
-`PgResult.commandCount()` and `commandCount(tag)` return `!?u64` for exactly
-INSERT0N, UPDATE, DELETE, MERGE, SELECT, MOVE, FETCH and COPY count tags. They read
-only the final CommandComplete tag, never sum counts or infer from result rows.
-Zero is a count; empty/other commands return null; malformed recognized tags or
-overflow fail. SELECT/FETCH counts describe returned rows, not modified rows;
-COPY tag recognition does not implement the COPY streaming protocol.
-`PgStream.commandCount()` requires validated ReadyForQuery (`IncompleteResult`
-before completion, `DatabaseError` after server failure). Provisional tags cannot
-turn a later statement or deferred commit failure into success.
-
-`queryRow[Opts]` / `queryRowParams[Opts]` return an optional owned PgRow: zero rows
-is null, one row transfers ownership to the caller (`row.deinit()`), multiple rows
-is `TooManyRows`. They finish protocol/error processing before returning.
-`PgResult.takeOne()` consumes the result on every exit, leaving it safe to deinit.
-`stream.singleRow(allocator)` copies the first row, drains through ReadyForQuery,
-and applies the same cardinality rule; late database errors take precedence.
-The caller still owns and must deinit the iterator and release its connection.
-Allocation failure invalidates the stream so release discards the connection.
-
-## Pool statistics
-
-`const snapshot = pool.stats();` returns a synchronized `PoolStats` containing
-only numbers. `idle + borrowed + connecting + empty == capacity` at that instant.
-Connected checked-out slots are borrowed; reserved slots still authenticating
-are connecting. Waiters counts condition-variable waits, excluding mutex entry
-and connection attempts; cancellation removes the waiter before returning.
-
-Saturating u64 lifetime counters are `initial_connections` (first successful
-connection for each slot), `reconnects` (successful replacements after discard),
-`connection_failures` (failed/canceled establishment attempts, including initial
-attempts on lazy pools) and `discards` (explicit or unsafe-release destruction).
-A canceled pool waiter is not a connection failure. Failed eager initialization
-returns no pool/snapshot. Snapshot/counter synchronization performs no network I/O;
-connect/disconnect happen outside the lock. Join all borrowers/waiters before
-pool deinit. Gauges expose no credentials, SQL, parameters or customer values.
+Licensed under the [MIT License](LICENSE), copyright zig-postgres developers.
