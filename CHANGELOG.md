@@ -8,6 +8,7 @@
   signature changes in a breaking 0.4 release.
 - Add an independent Docker-based PostgreSQL 16 acceptance suite, with bounded
   startup, execution, cancellation, and owned cleanup.
+- Update the standalone verification suite to `zig-process` 0.6.1.
 - Add `Pool.healthCheckOpts` with one absolute acquisition/query deadline.
 - Add owned PostgreSQL URI configuration, finite floating-point parameter
   binding, final command counts, and optional single-row helpers.
